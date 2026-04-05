@@ -1,0 +1,9 @@
+.pytest_cache/
+__pycache__/
+*.pyc
+.mypy_cache/
+runtime/
+artifacts/
+.gvisor-hook/
+open-interpreter/
+third_party/gvisor/.git.backup-local/
