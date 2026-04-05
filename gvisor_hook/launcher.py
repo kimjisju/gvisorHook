@@ -146,6 +146,7 @@ def spawn_broker(
     bind_host: str,
     http_socket_path: Path,
     tcp_port: int,
+    log_path: Path,
     event_log_path: Path | None,
     decision_dir: Path | None,
 ) -> subprocess.Popen[bytes]:
@@ -178,10 +179,15 @@ def spawn_broker(
                 str(decision_dir),
             ]
         )
-    return subprocess.Popen(
-        command,
-        cwd=str(Path(__file__).resolve().parent.parent),
-    )
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as broker_log:
+        return subprocess.Popen(
+            command,
+            cwd=str(Path(__file__).resolve().parent.parent),
+            stdin=subprocess.DEVNULL,
+            stdout=broker_log,
+            stderr=subprocess.STDOUT,
+        )
 
 
 def make_runtime_dir(workdir: Path) -> Path:
@@ -328,9 +334,13 @@ def launch(args: argparse.Namespace) -> int:
         raise FileNotFoundError(f"workdir does not exist: {workdir}")
 
     runtime_dir = make_runtime_dir(workdir)
+    approval_ipc_dir = Path("/tmp") / f"gvisor-hook-{runtime_dir.name}"
+    approval_ipc_dir.mkdir(parents=True, exist_ok=True)
+    approval_ipc_dir.chmod(0o777)
     bundle_dir = runtime_dir / "bundle"
-    broker_socket_path = runtime_dir / "broker.sock"
+    broker_socket_path = approval_ipc_dir / "broker.sock"
     proxy_http_socket_path = runtime_dir / "proxy-http.sock"
+    broker_log_path = runtime_dir / "broker.log"
     console_socket_path = runtime_dir / "console.sock"
     runsc_root = runtime_dir / "runsc-root"
     debug_log_dir = runtime_dir / "runsc-logs"
@@ -340,6 +350,7 @@ def launch(args: argparse.Namespace) -> int:
     container_id = f"open-interpreter-{int(time.time())}"
     host_ip = discover_host_ip()
     broker_tcp_port = reserve_tcp_port()
+    sandbox_broker_socket_path = str(broker_socket_path)
     runsc_bin = Path(args.runsc_bin).resolve() if args.runsc_bin else find_runsc_binary()
     broker_proc = None
     runsc_proc = None
@@ -352,6 +363,7 @@ def launch(args: argparse.Namespace) -> int:
             host_ip,
             proxy_http_socket_path,
             broker_tcp_port,
+            broker_log_path,
             None,
             None,
         )
@@ -367,13 +379,20 @@ def launch(args: argparse.Namespace) -> int:
             hosts_path=str(hosts_path),
             nsswitch_conf_path=str(nsswitch_path),
             proxy_base_url="http://127.0.0.1:18080/openai/v1",
-            hook_socket_path=str(broker_socket_path),
             hook_timeout_ms=int(args.decision_timeout * 1000),
             hook_warmup_ms=5000,
             hook_container_id=container_id,
         )
         config_path = bundle_dir / "config.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["process"]["env"] = [
+            entry
+            for entry in config["process"]["env"]
+            if not entry.startswith("GVISOR_HOOK_ADDR=")
+            and not entry.startswith("GVISOR_HOOK_SOCKET=")
+            and not entry.startswith("GVISOR_HOOK_EVENT_LOG=")
+            and not entry.startswith("GVISOR_HOOK_DECISION_DIR=")
+        ]
         config["mounts"].append(
             {
                 "destination": "/tmp/bootstrap",
@@ -396,7 +415,7 @@ def launch(args: argparse.Namespace) -> int:
         env = os.environ.copy()
         env.update(
             {
-                "GVISOR_HOOK_SOCKET": str(broker_socket_path),
+                "GVISOR_HOOK_ADDR": f"127.0.0.1:{broker_tcp_port}",
                 "GVISOR_HOOK_TIMEOUT_MS": str(int(args.decision_timeout * 1000)),
                 "GVISOR_HOOK_WARMUP_MS": "5000",
                 "GVISOR_HOOK_CONTAINER_ID": container_id,

@@ -140,6 +140,10 @@ type Boot struct {
 	// userLogFD is the file descriptor to write user logs to.
 	userLogFD int
 
+	// approvalFD is the file descriptor of a pre-connected approval broker
+	// stream donated by runsc.
+	approvalFD int
+
 	// startSyncFD is the file descriptor to synchronize runsc and sandbox.
 	startSyncFD int
 
@@ -256,6 +260,7 @@ func (b *Boot) SetFlags(f *flag.FlagSet) {
 	f.Var(&b.goferFilestoreFDs, "gofer-filestore-fds", "FDs to the regular files that will back the overlayfs or tmpfs mount if a gofer mount is to be overlaid.")
 	f.Var(&b.goferMountConfs, "gofer-mount-confs", "information about how the gofer mounts have been configured.")
 	f.IntVar(&b.userLogFD, "user-log-fd", 0, "file descriptor to write user logs to. 0 means no logging.")
+	f.IntVar(&b.approvalFD, "approval-fd", -1, "file descriptor of a pre-connected approval broker stream")
 	f.IntVar(&b.startSyncFD, "start-sync-fd", -1, "required FD to used to synchronize sandbox startup")
 	f.IntVar(&b.mountsFD, "mounts-fd", -1, "mountsFD is an optional file descriptor to read list of mounts after they have been resolved (direct paths, no symlinks).")
 	f.IntVar(&b.podInitConfigFD, "pod-init-config-fd", -1, "file descriptor to the pod init configuration file.")
@@ -561,6 +566,11 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 	}
 
 	linux.SetAFSSyscallPanic(conf.TestOnlyAFSSyscallPanic)
+	if b.approvalFD >= 0 {
+		if err := linux.SetApprovalIPCFile(os.NewFile(uintptr(b.approvalFD), "approval broker stream")); err != nil {
+			util.Fatalf("configuring approval broker transport: %v", err)
+		}
+	}
 
 	// Create the loader.
 	bootArgs := boot.Args{

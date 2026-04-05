@@ -23,6 +23,7 @@ import (
 
 type approvalConfig struct {
 	enabled     bool
+	donated     bool
 	network     string
 	address     string
 	socketPath  string
@@ -62,7 +63,17 @@ var (
 	hookConfig     approvalConfig
 	hookConfigOnce sync.Once
 	eventCounter   uint64
+
+	approvalTransportMu sync.Mutex
+	approvalTransport   *approvalStream
 )
+
+type approvalStream struct {
+	conn    net.Conn
+	reader  *bufio.Reader
+	decoder *json.Decoder
+	encoder *json.Encoder
+}
 
 var ignoredApprovalPrefixes = []string{
 	"/tmp/bootstrap",
@@ -134,13 +145,48 @@ func readTaskEnv(t *kernel.Task, key string) string {
 	return ""
 }
 
+// SetApprovalIPCFile installs a donated approval transport for the sentry to
+// use when prompting the external broker.
+func SetApprovalIPCFile(file *os.File) error {
+	approvalTransportMu.Lock()
+	defer approvalTransportMu.Unlock()
+	if approvalTransport != nil {
+		_ = approvalTransport.conn.Close()
+		approvalTransport = nil
+	}
+	if file == nil {
+		return nil
+	}
+	conn, err := net.FileConn(file)
+	_ = file.Close()
+	if err != nil {
+		return err
+	}
+	reader := bufio.NewReader(conn)
+	approvalTransport = &approvalStream{
+		conn:    conn,
+		reader:  reader,
+		decoder: json.NewDecoder(reader),
+		encoder: json.NewEncoder(conn),
+	}
+	log.Infof("gvisor-hook: donated approval transport installed")
+	return nil
+}
+
+func hasApprovalTransport() bool {
+	approvalTransportMu.Lock()
+	defer approvalTransportMu.Unlock()
+	return approvalTransport != nil
+}
+
 func loadApprovalConfigForTask(t *kernel.Task) approvalConfig {
 	hookConfigOnce.Do(func() {
 		hookAddr := readTaskEnv(t, "GVISOR_HOOK_ADDR")
 		socketPath := readTaskEnv(t, "GVISOR_HOOK_SOCKET")
 		eventLog := readTaskEnv(t, "GVISOR_HOOK_EVENT_LOG")
 		decisionDir := readTaskEnv(t, "GVISOR_HOOK_DECISION_DIR")
-		if hookAddr == "" && socketPath == "" && (eventLog == "" || decisionDir == "") {
+		donated := hasApprovalTransport()
+		if !donated && hookAddr == "" && socketPath == "" && (eventLog == "" || decisionDir == "") {
 			log.Infof("gvisor-hook: disabled; no approval backend configured")
 			hookConfig = approvalConfig{}
 			return
@@ -169,6 +215,7 @@ func loadApprovalConfigForTask(t *kernel.Task) approvalConfig {
 		}
 		hookConfig = approvalConfig{
 			enabled:     true,
+			donated:     donated,
 			network:     network,
 			address:     address,
 			socketPath:  socketPath,
@@ -179,7 +226,8 @@ func loadApprovalConfigForTask(t *kernel.Task) approvalConfig {
 			enableAfter: time.Now().Add(warmup),
 		}
 		log.Infof(
-			"gvisor-hook: enabled network=%q address=%q socket=%q event_log=%q decision_dir=%q container=%q timeout=%s warmup=%s",
+			"gvisor-hook: enabled donated=%t network=%q address=%q socket=%q event_log=%q decision_dir=%q container=%q timeout=%s warmup=%s",
+			donated,
 			network,
 			address,
 			socketPath,
@@ -231,6 +279,9 @@ func requestApproval(t *kernel.Task, syscallName, summary, path string, argv []s
 		StartedAt:   time.Now().UTC().Format(time.RFC3339Nano),
 		Status:      "pending",
 	}
+	if cfg.donated {
+		return requestApprovalViaDonatedStream(cfg, syscallName, event)
+	}
 	if cfg.address != "" {
 		return requestApprovalViaSocket(cfg, syscallName, event)
 	}
@@ -239,6 +290,35 @@ func requestApproval(t *kernel.Task, syscallName, summary, path string, argv []s
 	}
 	log.Warningf("gvisor-hook: no usable backend for syscall=%s id=%s", syscallName, event.ID)
 	return linuxerr.EPERM
+}
+
+func requestApprovalViaDonatedStream(cfg approvalConfig, syscallName string, event approvalEvent) error {
+	approvalTransportMu.Lock()
+	defer approvalTransportMu.Unlock()
+	if approvalTransport == nil {
+		log.Warningf("gvisor-hook: donated transport missing syscall=%s id=%s", syscallName, event.ID)
+		return linuxerr.EPERM
+	}
+	if err := approvalTransport.encoder.Encode(ipcEnvelope{Type: "syscall_event", Payload: &event}); err != nil {
+		log.Warningf("gvisor-hook: donated send failed syscall=%s id=%s err=%v", syscallName, event.ID, err)
+		_ = approvalTransport.conn.Close()
+		approvalTransport = nil
+		return linuxerr.EPERM
+	}
+	log.Infof("gvisor-hook: sent syscall=%s id=%s waiting-for-decision (donated transport)", syscallName, event.ID)
+	var result decisionResult
+	if err := approvalTransport.decoder.Decode(&result); err != nil {
+		log.Warningf("gvisor-hook: donated receive failed syscall=%s id=%s err=%v", syscallName, event.ID, err)
+		_ = approvalTransport.conn.Close()
+		approvalTransport = nil
+		return linuxerr.EPERM
+	}
+	if result.Decision != "allow" {
+		log.Infof("gvisor-hook: denied syscall=%s id=%s errno=%s", syscallName, event.ID, result.Errno)
+		return linuxerr.EPERM
+	}
+	log.Infof("gvisor-hook: allowed syscall=%s id=%s path=%q", syscallName, event.ID, event.Path)
+	return nil
 }
 
 func requestApprovalViaFiles(cfg approvalConfig, syscallName string, event approvalEvent) error {

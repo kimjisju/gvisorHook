@@ -93,7 +93,7 @@ def write_bundle_config(
         "ociVersion": "1.0.2",
         "process": {
             "terminal": True,
-            "user": {"uid": os.getuid(), "gid": os.getgid()},
+            "user": {"uid": 0, "gid": 0},
             "args": [
                 "/usr/bin/python3",
                 "/tmp/open-interpreter/bin/interpreter",

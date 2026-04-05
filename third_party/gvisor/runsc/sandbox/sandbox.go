@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"os"
 	"os/exec"
 	"path"
@@ -946,6 +947,26 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 	donations.Donate("start-sync-fd", startSyncFile)
 	if err := donations.DonateLogFile("user-log-fd", args.UserLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, lfOpts); err != nil {
 		return err
+	}
+	if approvalAddr := os.Getenv("GVISOR_HOOK_ADDR"); approvalAddr != "" {
+		approvalConn, err := net.DialTimeout("tcp", approvalAddr, 5*time.Second)
+		if err != nil {
+			return fmt.Errorf("connecting approval broker %q: %w", approvalAddr, err)
+		}
+		fileConn, ok := approvalConn.(interface {
+			File() (*os.File, error)
+		})
+		if !ok {
+			_ = approvalConn.Close()
+			return fmt.Errorf("approval broker connection %q does not expose File()", approvalAddr)
+		}
+		approvalFile, err := fileConn.File()
+		_ = approvalConn.Close()
+		if err != nil {
+			return fmt.Errorf("exporting approval broker fd for %q: %w", approvalAddr, err)
+		}
+		donations.DonateAndClose("approval-fd", approvalFile)
+		log.Infof("Approval broker stream connected: %q", approvalAddr)
 	}
 	if err := profile.DonateProfileFDs(conf, &donations, false /* isGofer */, lfOpts); err != nil {
 		return fmt.Errorf("donating profile FDs: %w", err)

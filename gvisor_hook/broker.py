@@ -178,45 +178,46 @@ class ApprovalBroker:
 
     async def _handle_ipc_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
-            raw = await reader.readline()
-            if not raw:
-                return
-            message = json.loads(raw.decode())
-            msg_type = message.get("type")
-            if msg_type == "heartbeat":
-                writer.write(b'{"type":"heartbeat"}\n')
+            while True:
+                raw = await reader.readline()
+                if not raw:
+                    return
+                message = json.loads(raw.decode())
+                msg_type = message.get("type")
+                if msg_type == "heartbeat":
+                    writer.write(b'{"type":"heartbeat"}\n')
+                    await writer.drain()
+                    continue
+                if msg_type != "syscall_event":
+                    writer.write(b'{"type":"decision_result","decision":"deny","errno":"EPERM"}\n')
+                    await writer.drain()
+                    continue
+                event = SyscallEvent(**message["payload"])
+                LOG.info(
+                    "Received syscall event id=%s syscall=%s pid=%s path=%s",
+                    event.id,
+                    event.syscall,
+                    event.pid,
+                    event.path,
+                )
+                future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+                async with self._lock:
+                    self._events[event.id] = event
+                    self._pending[event.id] = future
+                await self._broadcast(BrokerEnvelope("event-upsert", {"event": event.to_dict()}).to_dict())
+                decision = "deny"
+                errno = "EPERM"
+                try:
+                    decision = await asyncio.wait_for(future, timeout=self.decision_timeout)
+                    errno = None if decision == "allow" else "EPERM"
+                except asyncio.TimeoutError:
+                    LOG.warning("Timed out waiting for decision id=%s syscall=%s", event.id, event.syscall)
+                    await self._set_status(event.id, "timeout", errno)
+                else:
+                    LOG.info("Decision id=%s syscall=%s decision=%s", event.id, event.syscall, decision)
+                    await self._set_status(event.id, "allowed" if decision == "allow" else "denied", errno)
+                writer.write(json.dumps({"type": "decision_result", "id": event.id, "decision": decision, "errno": errno}).encode() + b"\n")
                 await writer.drain()
-                return
-            if msg_type != "syscall_event":
-                writer.write(b'{"type":"decision_result","decision":"deny","errno":"EPERM"}\n')
-                await writer.drain()
-                return
-            event = SyscallEvent(**message["payload"])
-            LOG.info(
-                "Received syscall event id=%s syscall=%s pid=%s path=%s",
-                event.id,
-                event.syscall,
-                event.pid,
-                event.path,
-            )
-            future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-            async with self._lock:
-                self._events[event.id] = event
-                self._pending[event.id] = future
-            await self._broadcast(BrokerEnvelope("event-upsert", {"event": event.to_dict()}).to_dict())
-            decision = "deny"
-            errno = "EPERM"
-            try:
-                decision = await asyncio.wait_for(future, timeout=self.decision_timeout)
-                errno = None if decision == "allow" else "EPERM"
-            except asyncio.TimeoutError:
-                LOG.warning("Timed out waiting for decision id=%s syscall=%s", event.id, event.syscall)
-                await self._set_status(event.id, "timeout", errno)
-            else:
-                LOG.info("Decision id=%s syscall=%s decision=%s", event.id, event.syscall, decision)
-                await self._set_status(event.id, "allowed" if decision == "allow" else "denied", errno)
-            writer.write(json.dumps({"type": "decision_result", "id": event.id, "decision": decision, "errno": errno}).encode() + b"\n")
-            await writer.drain()
         except Exception as exc:  # pragma: no cover
             LOG.exception("IPC handler failed: %s", exc)
         finally:
