@@ -28,6 +28,8 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--tcp-port", type=int, default=None)
     serve_parser.add_argument("--event-log-path", default=None)
     serve_parser.add_argument("--decision-dir", default=None)
+    serve_parser.add_argument("--llm-log-path", default=None)
+    serve_parser.add_argument("--llm-proxy-url", default=None)
     return parser
 
 

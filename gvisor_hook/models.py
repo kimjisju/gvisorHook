@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 Decision = Literal["allow", "deny"]
 EventStatus = Literal["pending", "allowed", "denied", "timeout", "error"]
+LLMStatus = Literal["pending", "completed", "error"]
 
 
 def utc_now() -> str:
@@ -26,6 +27,25 @@ class SyscallEvent:
     started_at: str = field(default_factory=utc_now)
     status: EventStatus = "pending"
     errno: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class LLMExchange:
+    id: str
+    method: str
+    url: str
+    started_at: str = field(default_factory=utc_now)
+    status: LLMStatus = "pending"
+    model: str | None = None
+    request_summary: str | None = None
+    request_body: Any | None = None
+    response_status: int | None = None
+    response_summary: str | None = None
+    response_body: Any | None = None
+    error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -15,11 +15,13 @@ class ApprovalBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.socket_path = Path(self.tempdir.name) / "broker.sock"
         self.event_log_path = Path(self.tempdir.name) / "events.ndjson"
         self.decision_dir = Path(self.tempdir.name) / "decisions"
+        self.llm_log_path = Path(self.tempdir.name) / "llm.ndjson"
         self.broker = ApprovalBroker(
             self.socket_path,
             decision_timeout=0.2,
             event_log_path=self.event_log_path,
             decision_dir=self.decision_dir,
+            llm_log_path=self.llm_log_path,
         )
         await self.broker.start()
 
@@ -100,3 +102,29 @@ class ApprovalBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(decision_path.exists())
         decision = json.loads(decision_path.read_text(encoding="utf-8"))
         self.assertEqual(decision["decision"], "allow")
+
+    async def test_llm_log_round_trip(self) -> None:
+        payload = {
+            "type": "llm-upsert",
+            "payload": {
+                "id": "llm-1",
+                "method": "POST",
+                "url": "https://api.openai.com/v1/chat/completions",
+                "started_at": "2026-04-06T00:00:00Z",
+                "status": "completed",
+                "model": "gpt-4o",
+                "request_summary": "model=gpt-4o; messages=2; tools=1",
+                "request_body": {"model": "gpt-4o", "messages": [{"role": "user", "content": "hello"}]},
+                "response_status": 200,
+                "response_summary": "assistant: hi",
+                "response_body": {"choices": [{"message": {"role": "assistant", "content": "hi"}}]},
+                "error": None,
+            },
+        }
+        self.llm_log_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        await asyncio.sleep(0.3)
+        snapshot = await self.broker.snapshot()
+        self.assertEqual(len(snapshot["payload"]["llm_exchanges"]), 1)
+        exchange = snapshot["payload"]["llm_exchanges"][0]
+        self.assertEqual(exchange["id"], "llm-1")
+        self.assertEqual(exchange["response_status"], 200)

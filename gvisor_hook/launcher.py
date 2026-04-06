@@ -73,6 +73,17 @@ def find_runsc_binary() -> Path:
     raise FileNotFoundError("Could not find a custom runsc binary. Build it first with scripts/build_runsc.sh.")
 
 
+def find_mitmdump_binary() -> Path:
+    candidates = [
+        Path("/home/kimjisu/download/mitmdump"),
+        Path(shutil.which("mitmdump") or ""),
+    ]
+    for candidate in candidates:
+        if candidate and candidate.exists():
+            return candidate
+    raise FileNotFoundError("Could not find mitmdump. Expected /home/kimjisu/download/mitmdump.")
+
+
 def relay_tty(master_fd: int, child: subprocess.Popen[bytes]) -> int:
     stdin_fd = sys.stdin.fileno()
     stdout_fd = sys.stdout.fileno()
@@ -121,6 +132,21 @@ def wait_for_http_ready(port: int, timeout: float) -> None:
     raise RuntimeError(f"broker did not become ready on port {port}")
 
 
+def wait_for_tcp_ready(host: str, port: int, timeout: float) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(1)
+            sock.connect((host, port))
+            return
+        except OSError:
+            time.sleep(0.2)
+        finally:
+            sock.close()
+    raise RuntimeError(f"service did not become ready on {host}:{port}")
+
+
 def discover_host_ip() -> str:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -149,6 +175,8 @@ def spawn_broker(
     log_path: Path,
     event_log_path: Path | None,
     decision_dir: Path | None,
+    llm_log_path: Path | None,
+    llm_proxy_url: str | None,
 ) -> subprocess.Popen[bytes]:
     command = [
         sys.executable,
@@ -179,15 +207,51 @@ def spawn_broker(
                 str(decision_dir),
             ]
         )
+    if llm_log_path is not None:
+        command.extend(["--llm-log-path", str(llm_log_path)])
+    if llm_proxy_url is not None:
+        command.extend(["--llm-proxy-url", llm_proxy_url])
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("a", encoding="utf-8") as broker_log:
-        return subprocess.Popen(
-            command,
-            cwd=str(Path(__file__).resolve().parent.parent),
-            stdin=subprocess.DEVNULL,
-            stdout=broker_log,
-            stderr=subprocess.STDOUT,
-        )
+    broker_log = log_path.open("a", encoding="utf-8")
+    return subprocess.Popen(
+        command,
+        cwd=str(Path(__file__).resolve().parent.parent),
+        stdin=subprocess.DEVNULL,
+        stdout=broker_log,
+        stderr=subprocess.STDOUT,
+    )
+
+
+def spawn_mitmdump(
+    mitmdump_bin: Path,
+    listen_port: int,
+    log_path: Path,
+    llm_log_path: Path,
+) -> subprocess.Popen[bytes]:
+    addon_path = Path(__file__).resolve().parent / "mitm_addon.py"
+    env = os.environ.copy()
+    env["GVISOR_HOOK_LLM_LOG_PATH"] = str(llm_log_path)
+    mitm_log = log_path.open("a", encoding="utf-8")
+    return subprocess.Popen(
+        [
+            str(mitmdump_bin),
+            "--listen-host",
+            "127.0.0.1",
+            "--listen-port",
+            str(listen_port),
+            "--set",
+            "block_global=false",
+            "--set",
+            "termlog_verbosity=warn",
+            "-s",
+            str(addon_path),
+        ],
+        cwd=str(Path(__file__).resolve().parent.parent),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=mitm_log,
+        stderr=subprocess.STDOUT,
+    )
 
 
 def make_runtime_dir(workdir: Path) -> Path:
@@ -341,6 +405,8 @@ def launch(args: argparse.Namespace) -> int:
     broker_socket_path = approval_ipc_dir / "broker.sock"
     proxy_http_socket_path = runtime_dir / "proxy-http.sock"
     broker_log_path = runtime_dir / "broker.log"
+    llm_log_path = runtime_dir / "llm.ndjson"
+    mitm_log_path = runtime_dir / "mitmproxy.log"
     console_socket_path = runtime_dir / "console.sock"
     runsc_root = runtime_dir / "runsc-root"
     debug_log_dir = runtime_dir / "runsc-logs"
@@ -350,12 +416,21 @@ def launch(args: argparse.Namespace) -> int:
     container_id = f"open-interpreter-{int(time.time())}"
     host_ip = discover_host_ip()
     broker_tcp_port = reserve_tcp_port()
-    sandbox_broker_socket_path = str(broker_socket_path)
+    mitm_tcp_port = reserve_tcp_port()
     runsc_bin = Path(args.runsc_bin).resolve() if args.runsc_bin else find_runsc_binary()
+    mitmdump_bin = find_mitmdump_binary()
     broker_proc = None
+    mitm_proc = None
     runsc_proc = None
     console_server = None
     try:
+        mitm_proc = spawn_mitmdump(
+            mitmdump_bin,
+            mitm_tcp_port,
+            mitm_log_path,
+            llm_log_path,
+        )
+        wait_for_tcp_ready("127.0.0.1", mitm_tcp_port, timeout=10)
         broker_proc = spawn_broker(
             broker_socket_path,
             args.web_port,
@@ -366,6 +441,8 @@ def launch(args: argparse.Namespace) -> int:
             broker_log_path,
             None,
             None,
+            llm_log_path,
+            f"http://127.0.0.1:{mitm_tcp_port}",
         )
         wait_for_http_ready(args.web_port, timeout=10)
         resolv_path, hosts_path, nsswitch_path = write_runtime_network_files(runtime_dir)
@@ -424,6 +501,7 @@ def launch(args: argparse.Namespace) -> int:
 
         print(f"Approval UI: http://127.0.0.1:{args.web_port}", file=sys.stderr)
         print("Sandbox proxy base: http://127.0.0.1:18080/openai/v1 (intercepted to Unix socket)", file=sys.stderr)
+        print(f"LLM MITM: http://127.0.0.1:{mitm_tcp_port}", file=sys.stderr)
         print(f"runsc logs: {debug_log_dir}", file=sys.stderr)
         runsc_proc = subprocess.Popen(
             [
@@ -462,3 +540,7 @@ def launch(args: argparse.Namespace) -> int:
             with suppress(Exception):
                 broker_proc.send_signal(signal.SIGTERM)
                 broker_proc.wait(timeout=5)
+        if mitm_proc is not None and mitm_proc.poll() is None:
+            with suppress(Exception):
+                mitm_proc.send_signal(signal.SIGTERM)
+                mitm_proc.wait(timeout=5)
