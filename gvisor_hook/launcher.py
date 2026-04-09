@@ -5,6 +5,7 @@ import ipaddress
 import json
 import os
 import select
+import shlex
 import shutil
 import signal
 import socket
@@ -15,10 +16,39 @@ import tempfile
 import termios
 import time
 import tty
+from dataclasses import dataclass
 from contextlib import suppress
 from pathlib import Path
 
 from .bundle import write_bundle_config
+
+
+@dataclass(frozen=True)
+class MountSpec:
+    source: Path
+    destination: str
+    recursive: bool = True
+    writable: bool = False
+
+    def to_oci_mount(self) -> dict[str, object]:
+        mode = "rw" if self.writable else "ro"
+        bind_mode = "rbind" if self.recursive else "bind"
+        return {
+            "destination": self.destination,
+            "type": "bind",
+            "source": str(self.source),
+            "options": [bind_mode, mode],
+        }
+
+
+@dataclass(frozen=True)
+class ResolvedAgent:
+    name: str
+    host_command: Path
+    container_command: str
+    process_args: list[str]
+    mount_specs: list[MountSpec]
+    python_path_entries: list[str]
 
 
 class ConsoleSocketServer:
@@ -62,9 +92,10 @@ class ConsoleSocketServer:
 
 
 def find_runsc_binary() -> Path:
+    project_root = Path(__file__).resolve().parent.parent
     candidates = [
-        Path("/home/kimjisu/gvisorHook/third_party/gvisor/bin/runsc-hook"),
-        Path("/home/kimjisu/gvisorHook/third_party/gvisor/bazel-bin/runsc/runsc_/runsc"),
+        project_root / "third_party/gvisor/bin/runsc-hook",
+        project_root / "third_party/gvisor/bazel-bin/runsc/runsc_/runsc",
         Path(shutil.which("runsc") or ""),
     ]
     for candidate in candidates:
@@ -75,13 +106,197 @@ def find_runsc_binary() -> Path:
 
 def find_mitmdump_binary() -> Path:
     candidates = [
-        Path("/home/kimjisu/download/mitmdump"),
+        Path.home() / "download/mitmdump",
         Path(shutil.which("mitmdump") or ""),
     ]
     for candidate in candidates:
         if candidate and candidate.exists():
             return candidate
-    raise FileNotFoundError("Could not find mitmdump. Expected /home/kimjisu/download/mitmdump.")
+    raise FileNotFoundError("Could not find mitmdump. Install it or add it to PATH.")
+
+
+def sanitize_name(value: str) -> str:
+    sanitized = "".join(char if char.isalnum() else "-" for char in value.lower()).strip("-")
+    return sanitized or "agent"
+
+
+def iter_config_dir_candidates(agent_name: str, home_dir: Path) -> list[Path]:
+    return [
+        home_dir / f".{agent_name}",
+        home_dir / agent_name,
+        home_dir / ".config" / agent_name,
+    ]
+
+
+def prompt_for_config_mount(agent_name: str) -> Path | None:
+    if not sys.stdin.isatty():
+        return None
+    response = input(
+        f"Config directory for '{agent_name}' was not found automatically. "
+        "Enter a directory path to mount, or press Enter to continue without one: "
+    ).strip()
+    if not response:
+        return None
+    candidate = Path(response).expanduser().resolve()
+    if not candidate.is_dir():
+        raise FileNotFoundError(f"Config directory does not exist: {candidate}")
+    return candidate
+
+
+def resolve_config_mount(agent_name: str, override: str | None, runtime_home_dir: str) -> MountSpec | None:
+    home_dir = Path.home()
+    candidates: list[Path]
+    if override:
+        candidates = [Path(override).expanduser().resolve()]
+    else:
+        candidates = iter_config_dir_candidates(agent_name, home_dir)
+    for candidate in candidates:
+        if candidate.is_dir():
+            try:
+                relative = candidate.relative_to(home_dir)
+            except ValueError:
+                relative = Path(".config") / agent_name
+            return MountSpec(
+                source=candidate,
+                destination=f"{runtime_home_dir}/{relative.as_posix()}",
+                recursive=True,
+                writable=True,
+            )
+    prompted = prompt_for_config_mount(agent_name)
+    if prompted is None:
+        return None
+    try:
+        relative = prompted.relative_to(home_dir)
+    except ValueError:
+        relative = Path(".config") / agent_name
+    return MountSpec(
+        source=prompted,
+        destination=f"{runtime_home_dir}/{relative.as_posix()}",
+        recursive=True,
+        writable=True,
+    )
+
+
+def parse_shebang_command(command_path: Path) -> list[str]:
+    try:
+        with command_path.open("r", encoding="utf-8") as fh:
+            first_line = fh.readline().strip()
+    except UnicodeDecodeError:
+        return []
+    if not first_line.startswith("#!"):
+        return []
+    return shlex.split(first_line[2:].strip())
+
+
+def resolve_python_from_shebang(command_path: Path) -> Path | None:
+    parts = parse_shebang_command(command_path)
+    if not parts:
+        return None
+    interpreter = parts[0]
+    if Path(interpreter).name == "env":
+        for token in parts[1:]:
+            if token.startswith("-") or "=" in token:
+                continue
+            interpreter = token
+            break
+    if "python" not in Path(interpreter).name.lower():
+        return None
+    interpreter_path = Path(interpreter)
+    if interpreter_path.is_absolute() and interpreter_path.exists():
+        return interpreter_path
+    resolved = shutil.which(interpreter)
+    return Path(resolved).resolve() if resolved else None
+
+
+def discover_python_site_packages(python_bin: Path) -> list[Path]:
+    probe = (
+        "import json, site; "
+        "paths = []; "
+        "getsitepackages = getattr(site, 'getsitepackages', lambda: []); "
+        "paths.extend(getsitepackages()); "
+        "usersite = getattr(site, 'getusersitepackages', lambda: None)(); "
+        "paths.extend(usersite if isinstance(usersite, list) else [usersite] if usersite else []); "
+        "print(json.dumps(paths))"
+    )
+    result = subprocess.run(
+        [str(python_bin), "-c", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    paths = json.loads(result.stdout)
+    unique_paths: list[Path] = []
+    seen: set[str] = set()
+    for raw_path in paths:
+        if not raw_path:
+            continue
+        candidate = Path(raw_path).expanduser().resolve()
+        key = str(candidate)
+        if key in seen or not candidate.is_dir():
+            continue
+        seen.add(key)
+        unique_paths.append(candidate)
+    return unique_paths
+
+
+def build_process_args(agent_name: str, container_command: str, proxy_base_url: str) -> list[str]:
+    args = [container_command]
+    if agent_name == "interpreter":
+        args.extend(["--api_base", proxy_base_url])
+    return args
+
+
+def resolve_agent(args: argparse.Namespace, runtime_home_dir: str) -> ResolvedAgent:
+    resolved_command = shutil.which(args.agent_cmd)
+    if not resolved_command:
+        raise FileNotFoundError(f"Could not find agent command '{args.agent_cmd}' in PATH.")
+
+    host_command = Path(resolved_command).resolve()
+    agent_name = sanitize_name(host_command.name)
+    container_bin_dir = "/tmp/agent/bin"
+    container_command = f"{container_bin_dir}/{host_command.name}"
+    mount_specs = [
+        MountSpec(
+            source=host_command,
+            destination=container_command,
+            recursive=False,
+            writable=False,
+        ),
+    ]
+    config_mount = resolve_config_mount(agent_name, args.config_mount, runtime_home_dir)
+    if config_mount is not None:
+        mount_specs.append(config_mount)
+
+    python_path_entries: list[str] = []
+    python_site_packages = (
+        [Path(args.python_site_packages).expanduser().resolve()]
+        if args.python_site_packages
+        else []
+    )
+    if not python_site_packages:
+        python_bin = resolve_python_from_shebang(host_command)
+        if python_bin is not None:
+            python_site_packages = discover_python_site_packages(python_bin)
+    for index, site_packages_dir in enumerate(python_site_packages):
+        destination = f"/tmp/python/site-packages/{index}"
+        mount_specs.append(
+            MountSpec(
+                source=site_packages_dir,
+                destination=destination,
+                recursive=True,
+                writable=False,
+            )
+        )
+        python_path_entries.append(destination)
+
+    return ResolvedAgent(
+        name=agent_name,
+        host_command=host_command,
+        container_command=container_command,
+        process_args=build_process_args(agent_name, container_command, "http://127.0.0.1:18080/openai/v1"),
+        mount_specs=mount_specs,
+        python_path_entries=python_path_entries,
+    )
 
 
 def relay_tty(master_fd: int, child: subprocess.Popen[bytes]) -> int:
@@ -413,7 +628,9 @@ def launch(args: argparse.Namespace) -> int:
     runsc_root.mkdir(parents=True, exist_ok=True)
     debug_log_dir.mkdir(parents=True, exist_ok=True)
 
-    container_id = f"open-interpreter-{int(time.time())}"
+    runtime_home_dir = "/tmp/agent-home"
+    resolved_agent = resolve_agent(args, runtime_home_dir)
+    container_id = f"{resolved_agent.name}-{int(time.time())}"
     host_ip = discover_host_ip()
     broker_tcp_port = reserve_tcp_port()
     mitm_tcp_port = reserve_tcp_port()
@@ -450,8 +667,12 @@ def launch(args: argparse.Namespace) -> int:
         write_bundle_config(
             bundle_dir,
             workdir=workdir,
-            runtime_home_dir="/tmp/oi-home",
+            runtime_home_dir=runtime_home_dir,
             container_id=container_id,
+            process_args=resolved_agent.process_args,
+            agent_bin_dir="/tmp/agent/bin",
+            extra_mounts=[mount_spec.to_oci_mount() for mount_spec in resolved_agent.mount_specs],
+            python_path_entries=resolved_agent.python_path_entries,
             resolv_conf_path=str(resolv_path),
             hosts_path=str(hosts_path),
             nsswitch_conf_path=str(nsswitch_path),
@@ -499,6 +720,7 @@ def launch(args: argparse.Namespace) -> int:
             }
         )
 
+        print(f"Agent command: {resolved_agent.host_command}", file=sys.stderr)
         print(f"Approval UI: http://127.0.0.1:{args.web_port}", file=sys.stderr)
         print("Sandbox proxy base: http://127.0.0.1:18080/openai/v1 (intercepted to Unix socket)", file=sys.stderr)
         print(f"LLM MITM: http://127.0.0.1:{mitm_tcp_port}", file=sys.stderr)

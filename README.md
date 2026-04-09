@@ -1,10 +1,10 @@
 # gVisor Hook MVP
 
-This repository wraps `Open Interpreter` in a custom gVisor runtime and exposes syscall approvals through a local web UI.
+This repository wraps an agent CLI in a custom gVisor runtime and exposes syscall approvals through a local web UI.
 
 ## What it does
 
-- Runs `/home/kimjisu/.local/bin/interpreter` inside `runsc`
+- Runs an agent command discovered from host `PATH` inside `runsc`
 - Leaves the terminal CLI experience intact by relaying the sandbox PTY
 - Hooks write-oriented file syscalls and `execve`
 - Pauses those syscalls until the browser UI approves or denies them
@@ -20,7 +20,7 @@ This repository wraps `Open Interpreter` in a custom gVisor runtime and exposes 
 ## Build the custom runsc
 
 ```bash
-cd /home/kimjisu/gvisorHook
+cd /home/kimji/workspace/gvisorHook
 ./scripts/build_runsc.sh
 ```
 
@@ -33,11 +33,17 @@ If you want to format the Go patches first:
 ## Launch the MVP
 
 ```bash
-cd /home/kimjisu/gvisorHook
-python3 -m gvisor_hook launch --workdir /home/kimjisu/gvisorHook --web-port 8080
+cd /home/kimji/workspace/gvisorHook
+python3 -m gvisor_hook launch --agent-cmd interpreter --workdir /home/kimji/workspace/gvisorHook --web-port 8080
 ```
 
 Then open `http://127.0.0.1:8080`.
+
+If the launcher cannot find a config directory automatically, pass one explicitly:
+
+```bash
+python3 -m gvisor_hook launch --agent-cmd claude --config-mount ~/.claude --workdir /home/kimji/workspace/gvisorHook
+```
 
 ## Current syscall scope
 
@@ -51,6 +57,6 @@ Then open `http://127.0.0.1:8080`.
 
 ## Notes
 
-- The current MVP uses host `/` as a read-only OCI root and binds the chosen workdir read-write. That keeps the interpreter installation available without repackaging a full rootfs.
+- The current MVP uses host `/` as a read-only OCI root and binds the chosen workdir read-write. The selected agent binary is bind-mounted from the host into the sandbox.
 - If the web UI is unreachable or no decision arrives before timeout, the syscall is denied with `EPERM`.
-- `Open Interpreter` source is untouched; only the launcher/runtime path is changed.
+- Python-based agents may also need their `site-packages` directories mounted. The launcher auto-detects those when the command is a Python entrypoint, and `--python-site-packages` can override the detected path.

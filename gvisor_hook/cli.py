@@ -12,11 +12,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python3 -m gvisor_hook")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    launch_parser = subparsers.add_parser("launch", help="launch Open Interpreter inside gVisor")
+    launch_parser = subparsers.add_parser("launch", help="launch an agent inside gVisor")
     launch_parser.add_argument("--workdir", required=True)
+    launch_parser.add_argument("--agent-cmd", default="interpreter")
     launch_parser.add_argument("--web-port", type=int, default=8080)
     launch_parser.add_argument("--decision-timeout", type=float, default=30.0)
     launch_parser.add_argument("--runsc-bin", default=None)
+    launch_parser.add_argument("--config-mount", default=None)
+    launch_parser.add_argument("--python-site-packages", default=None)
 
     serve_parser = subparsers.add_parser("serve", help=argparse.SUPPRESS)
     serve_parser.add_argument("--socket-path", required=True)

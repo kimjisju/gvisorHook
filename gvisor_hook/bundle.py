@@ -25,6 +25,8 @@ def build_process_env(
     home_dir: str,
     proxy_base_url: str,
     *,
+    agent_bin_dir: str,
+    python_path_entries: list[str] | None = None,
     hook_addr: str | None = None,
     hook_socket_path: str | None = None,
     hook_event_log_path: str | None = None,
@@ -38,15 +40,18 @@ def build_process_env(
         "XDG_CACHE_HOME": f"{home_dir}/.cache",
         "XDG_CONFIG_HOME": f"{home_dir}/.config",
         "PYTHONUNBUFFERED": "1",
-        "PYTHONPATH": "/tmp/bootstrap:/tmp/open-interpreter/site-packages",
         "OPENAI_BASE_URL": proxy_base_url,
         "OPENAI_API_BASE": proxy_base_url,
         "LITELLM_LOCAL_MODEL_COST_MAP": "true",
         "TERM": os.environ.get("TERM", "xterm-256color"),
         "COLORTERM": os.environ.get("COLORTERM", "truecolor"),
-        "PATH": "/tmp/open-interpreter/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "PATH": f"{agent_bin_dir}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "LANG": os.environ.get("LANG", "C.UTF-8"),
     }
+    python_path = ["/tmp/bootstrap"]
+    if python_path_entries:
+        python_path.extend(python_path_entries)
+    env["PYTHONPATH"] = ":".join(python_path)
     if hook_addr:
         env["GVISOR_HOOK_ADDR"] = hook_addr
     if hook_socket_path:
@@ -73,6 +78,10 @@ def write_bundle_config(
     workdir: Path,
     runtime_home_dir: str,
     container_id: str,
+    process_args: list[str],
+    agent_bin_dir: str,
+    extra_mounts: list[dict[str, object]],
+    python_path_entries: list[str] | None = None,
     resolv_conf_path: str,
     hosts_path: str,
     nsswitch_conf_path: str,
@@ -94,16 +103,13 @@ def write_bundle_config(
         "process": {
             "terminal": True,
             "user": {"uid": 0, "gid": 0},
-            "args": [
-                "/usr/bin/python3",
-                "/tmp/open-interpreter/bin/interpreter",
-                "--api_base",
-                proxy_base_url,
-            ],
+            "args": process_args,
             "cwd": "/tmp/workspace",
             "env": build_process_env(
                 runtime_home_dir,
                 proxy_base_url,
+                agent_bin_dir=agent_bin_dir,
+                python_path_entries=python_path_entries,
                 hook_addr=hook_addr,
                 hook_socket_path=hook_socket_path,
                 hook_event_log_path=hook_event_log_path,
@@ -129,8 +135,7 @@ def write_bundle_config(
             {"destination": "/etc/hosts", "type": "bind", "source": hosts_path, "options": ["bind", "ro"]},
             {"destination": "/etc/nsswitch.conf", "type": "bind", "source": nsswitch_conf_path, "options": ["bind", "ro"]},
             {"destination": "/tmp/workspace", "type": "bind", "source": str(workdir), "options": ["rbind", "rw"]},
-            {"destination": "/tmp/open-interpreter/bin/interpreter", "type": "bind", "source": "/home/kimjisu/.local/bin/interpreter", "options": ["bind", "ro"]},
-            {"destination": "/tmp/open-interpreter/site-packages", "type": "bind", "source": "/home/kimjisu/.local/lib/python3.10/site-packages", "options": ["rbind", "ro"]},
+            *extra_mounts,
         ],
         "linux": {
             "namespaces": [
