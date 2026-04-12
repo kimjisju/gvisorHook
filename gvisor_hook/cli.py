@@ -17,6 +17,8 @@ def build_parser() -> argparse.ArgumentParser:
     launch_parser.add_argument("--web-port", type=int, default=8080)
     launch_parser.add_argument("--decision-timeout", type=float, default=30.0)
     launch_parser.add_argument("--runsc-bin", default=None)
+    launch_parser.add_argument("--dataset-root", default=None)
+    launch_parser.add_argument("--no-plan-mode", action="store_true")
 
     serve_parser = subparsers.add_parser("serve", help=argparse.SUPPRESS)
     serve_parser.add_argument("--socket-path", required=True)

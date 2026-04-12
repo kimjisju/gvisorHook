@@ -9,6 +9,7 @@ This repository wraps `Open Interpreter` in a custom gVisor runtime and exposes 
 - Hooks write-oriented file syscalls and `execve`
 - Pauses those syscalls until the browser UI approves or denies them
 - Returns `EPERM` on deny or timeout
+- Captures raw agent terminal I/O plus raw LLM request/response artifacts for dataset creation
 
 ## Repository layout
 
@@ -38,6 +39,24 @@ python3 -m gvisor_hook launch --workdir /home/kimjisu/gvisorHook --web-port 8080
 ```
 
 Then open `http://127.0.0.1:8080`.
+
+By default the launcher enables a dataset-oriented plan mode by appending extra instructions that ask Open Interpreter to expose a short visible `PLAN` before acting. Use `--no-plan-mode` to disable that behavior.
+
+## Dataset outputs
+
+Each launch writes a session under:
+
+```bash
+/home/kimjisu/gvisorHook/datasets/raw-response-dataset/sessions/<session-id>
+```
+
+The main artifacts are:
+
+- `agent/stdin.bin`, `agent/stdout.bin`, `agent/terminal.ndjson`: raw terminal traffic between the user and agent
+- `llm/<flow-id>/request_headers.raw`, `request_body.bin`, `response_headers.raw`, `response_body.bin`: raw HTTP artifacts between the agent and the upstream LLM server
+- `llm/<flow-id>/meta.json`: metadata and hashes for the raw artifacts
+- `llm/ui.ndjson`: broker/UI upsert log that references the raw files
+- `broker.log`, `mitmproxy.log`: host-side process logs for the session
 
 ## Current syscall scope
 

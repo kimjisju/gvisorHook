@@ -65,13 +65,38 @@ INDEX_HTML = """<!doctype html>
   </main>
   <script>
     const pendingList=document.getElementById("pending-list"); const eventLog=document.getElementById("event-log"); const llmLog=document.getElementById("llm-log"); const pendingCount=document.getElementById("pending-count"); const connectionState=document.getElementById("connection-state");
-    const state={events:[],exchanges:[],focusedId:null};
+    const state={events:[],exchanges:[],focusedId:null,wsConnected:false};
     function sortEvents(events){return [...events].sort((a,b)=>new Date(b.started_at)-new Date(a.started_at));}
     function escapeHtml(v){return String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");}
     function prettyPayload(v){if(v===null||v===undefined)return ""; if(typeof v==="string") return v; try{return JSON.stringify(v,null,2);}catch(_err){return String(v);}}
-    async function decide(id,decision){if(!id||!decision)return; await fetch(`/api/events/${id}/decision`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({decision})}); await refreshSnapshot();}
+    function escapeSelector(v){if(window.CSS&&typeof window.CSS.escape==="function") return window.CSS.escape(v); return String(v).replaceAll("\\\\","\\\\\\\\").replaceAll('"','\\\\"');}
+    function captureScrollState(container){
+      const maxScroll=Math.max(0,container.scrollHeight-container.clientHeight);
+      const payloadScrolls=Array.from(container.querySelectorAll("[data-scroll-key]")).map((node)=>({key:node.dataset.scrollKey,top:node.scrollTop,left:node.scrollLeft}));
+      if(container.scrollTop<=8){return {mode:"top",payloadScrolls};}
+      if(maxScroll-container.scrollTop<=8){return {mode:"bottom",payloadScrolls};}
+      const anchor=Array.from(container.children).find((node)=>node.dataset.anchorId&&(node.offsetTop+node.offsetHeight)>container.scrollTop);
+      if(anchor){return {mode:"anchor",anchorId:anchor.dataset.anchorId,offset:anchor.offsetTop-container.scrollTop,payloadScrolls};}
+      return {mode:"offset",top:container.scrollTop,left:container.scrollLeft,payloadScrolls};
+    }
+    function restoreScrollState(container,snapshot){
+      if(!snapshot) return;
+      if(snapshot.mode==="top"){container.scrollTop=0;}
+      else if(snapshot.mode==="bottom"){container.scrollTop=Math.max(0,container.scrollHeight-container.clientHeight);}
+      else if(snapshot.mode==="anchor"&&snapshot.anchorId){
+        const anchor=container.querySelector(`[data-anchor-id="${escapeSelector(snapshot.anchorId)}"]`);
+        if(anchor){container.scrollTop=Math.max(0,anchor.offsetTop-snapshot.offset);}
+        else if(Number.isFinite(snapshot.top)){container.scrollTop=snapshot.top;}
+      }else if(Number.isFinite(snapshot.top)){container.scrollTop=snapshot.top; if(Number.isFinite(snapshot.left)) container.scrollLeft=snapshot.left;}
+      for(const payloadState of snapshot.payloadScrolls||[]){
+        const payload=container.querySelector(`[data-scroll-key="${escapeSelector(payloadState.key)}"]`);
+        if(payload){payload.scrollTop=payloadState.top||0; payload.scrollLeft=payloadState.left||0;}
+      }
+    }
+    async function decide(id,decision){if(!id||!decision)return; await fetch(`/api/events/${id}/decision`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({decision})}); if(!state.wsConnected) await refreshSnapshot();}
     function renderEvent(evt,actionable){
       const el=document.createElement("article"); el.className=`event ${evt.id===state.focusedId?"focused":""}`;
+      el.dataset.anchorId=`event:${evt.id}`;
       const path=evt.path?`<div>path: ${escapeHtml(evt.path)}</div>`:""; const argv=evt.argv&&evt.argv.length?`<div>argv: ${escapeHtml(evt.argv.join(" "))}</div>`:""; const errno=evt.errno?`<div>errno: ${escapeHtml(evt.errno)}</div>`:"";
       el.innerHTML=`<div class="event-head"><div><div class="syscall">${escapeHtml(evt.syscall)}</div><div class="summary">${escapeHtml(evt.summary)}</div></div><div class="status ${evt.status}">${escapeHtml(evt.status)}</div></div><div class="meta"><div>container: ${escapeHtml(evt.container_id)} | pid/tid: ${evt.pid}/${evt.tid}</div>${path}${argv}${errno}<div>started: ${escapeHtml(evt.started_at)}</div></div>${actionable?`<div class="actions"><button class="allow" data-id="${evt.id}" data-decision="allow">Allow (y)</button><button class="deny" data-id="${evt.id}" data-decision="deny">Deny (n)</button></div>`:""}`;
       el.querySelectorAll("button").forEach((button)=>button.addEventListener("click",async()=>{await decide(button.dataset.id,button.dataset.decision);}));
@@ -79,34 +104,55 @@ INDEX_HTML = """<!doctype html>
     }
     function renderExchange(exchange){
       const el=document.createElement("article"); el.className="exchange";
+      el.dataset.anchorId=`exchange:${exchange.id}`;
       const requestPayload=prettyPayload(exchange.request_body); const responsePayload=prettyPayload(exchange.response_body);
-      const requestSection=requestPayload?`<div class="payload-label">Request Body</div><pre class="payload">${escapeHtml(requestPayload)}</pre>`:"";
-      const responseSection=responsePayload?`<div class="payload-label">Response Body</div><pre class="payload">${escapeHtml(responsePayload)}</pre>`:"";
+      const requestSection=requestPayload?`<div class="payload-label">Request Body</div><pre class="payload" data-scroll-key="request:${escapeHtml(exchange.id)}">${escapeHtml(requestPayload)}</pre>`:"";
+      const responseSection=responsePayload?`<div class="payload-label">Response Body</div><pre class="payload" data-scroll-key="response:${escapeHtml(exchange.id)}">${escapeHtml(responsePayload)}</pre>`:"";
       const requestSummary=exchange.request_summary?`<div class="exchange-summary">${escapeHtml(exchange.request_summary)}</div>`:"";
       const responseSummary=exchange.response_summary?`<div class="meta"><strong>response:</strong> ${escapeHtml(exchange.response_summary)}</div>`:"";
       const model=exchange.model?`<div>model: ${escapeHtml(exchange.model)}</div>`:"";
       const responseStatus=exchange.response_status!==null&&exchange.response_status!==undefined?`<div>response_status: ${escapeHtml(exchange.response_status)}</div>`:"";
+      const sessionId=exchange.session_id?`<div>session_id: ${escapeHtml(exchange.session_id)}</div>`:"";
+      const requestBytes=exchange.request_body_bytes!==null&&exchange.request_body_bytes!==undefined?`<div>request_bytes: ${escapeHtml(exchange.request_body_bytes)}</div>`:"";
+      const responseBytes=exchange.response_body_bytes!==null&&exchange.response_body_bytes!==undefined?`<div>response_bytes: ${escapeHtml(exchange.response_body_bytes)}</div>`:"";
+      const requestHeadersPath=exchange.request_headers_path?`<div>request_headers_path: ${escapeHtml(exchange.request_headers_path)}</div>`:"";
+      const requestPath=exchange.request_body_path?`<div>request_body_path: ${escapeHtml(exchange.request_body_path)}</div>`:"";
+      const responseHeadersPath=exchange.response_headers_path?`<div>response_headers_path: ${escapeHtml(exchange.response_headers_path)}</div>`:"";
+      const responsePath=exchange.response_body_path?`<div>response_body_path: ${escapeHtml(exchange.response_body_path)}</div>`:"";
+      const metaPath=exchange.meta_path?`<div>meta_path: ${escapeHtml(exchange.meta_path)}</div>`:"";
+      const stream=exchange.is_stream?`<div>stream: true</div>`:"";
       const error=exchange.error?`<div>error: ${escapeHtml(exchange.error)}</div>`:"";
-      el.innerHTML=`<div class="event-head"><div><div class="exchange-kind">${escapeHtml(exchange.method)} ${escapeHtml(exchange.url)}</div>${requestSummary}</div><div class="status ${exchange.status}">${escapeHtml(exchange.status)}</div></div><div class="meta">${model}${responseStatus}${error}<div>started: ${escapeHtml(exchange.started_at)}</div></div>${responseSummary}${requestSection}${responseSection}`;
+      el.innerHTML=`<div class="event-head"><div><div class="exchange-kind">${escapeHtml(exchange.method)} ${escapeHtml(exchange.url)}</div>${requestSummary}</div><div class="status ${exchange.status}">${escapeHtml(exchange.status)}</div></div><div class="meta">${model}${sessionId}${responseStatus}${requestBytes}${responseBytes}${stream}${requestHeadersPath}${requestPath}${responseHeadersPath}${responsePath}${metaPath}${error}<div>started: ${escapeHtml(exchange.started_at)}</div></div>${responseSummary}${requestSection}${responseSection}`;
       return el;
     }
-    function render(){
-      const events=sortEvents(state.events); const pending=events.filter((evt)=>evt.status==="pending"); const exchanges=sortEvents(state.exchanges);
+    function renderSyscalls(){
+      const events=sortEvents(state.events); const pending=events.filter((evt)=>evt.status==="pending");
       if(!state.focusedId||!pending.some((evt)=>evt.id===state.focusedId)){state.focusedId=pending[0]?.id??null;}
-      pendingCount.textContent=`${pending.length} waiting`; pendingList.innerHTML=""; eventLog.innerHTML=""; llmLog.innerHTML="";
+      const pendingScroll=captureScrollState(pendingList); const eventScroll=captureScrollState(eventLog);
+      pendingCount.textContent=`${pending.length} waiting`; pendingList.innerHTML=""; eventLog.innerHTML="";
       if(!pending.length){pendingList.innerHTML='<div class="empty">No pending syscalls. The agent will pause here whenever a hooked operation happens.</div>';}
       for(const evt of pending){pendingList.appendChild(renderEvent(evt,true));}
       if(!events.length){eventLog.innerHTML='<div class="empty">No syscall events yet.</div>';}
       for(const evt of events){eventLog.appendChild(renderEvent(evt,false));}
+      restoreScrollState(pendingList,pendingScroll); restoreScrollState(eventLog,eventScroll);
+    }
+    function renderLLM(){
+      const exchanges=sortEvents(state.exchanges);
+      const llmScroll=captureScrollState(llmLog);
+      llmLog.innerHTML="";
       if(!exchanges.length){llmLog.innerHTML='<div class="empty">No LLM traffic captured yet.</div>';}
       for(const exchange of exchanges){llmLog.appendChild(renderExchange(exchange));}
+      restoreScrollState(llmLog,llmScroll);
+    }
+    function renderAll(){
+      renderSyscalls();
+      renderLLM();
     }
     function applyEnvelope(envelope){
       const payload=envelope.payload;
-      if(envelope.type==="snapshot"){state.events=payload.events; state.exchanges=payload.llm_exchanges||[];}
-      if(envelope.type==="event-upsert"){const idx=state.events.findIndex((evt)=>evt.id===payload.event.id); if(idx>=0) state.events[idx]=payload.event; else state.events.push(payload.event);}
-      if(envelope.type==="llm-upsert"){const idx=state.exchanges.findIndex((evt)=>evt.id===payload.exchange.id); if(idx>=0) state.exchanges[idx]=payload.exchange; else state.exchanges.push(payload.exchange);}
-      render();
+      if(envelope.type==="snapshot"){state.events=payload.events; state.exchanges=payload.llm_exchanges||[]; renderAll(); return;}
+      if(envelope.type==="event-upsert"){const idx=state.events.findIndex((evt)=>evt.id===payload.event.id); if(idx>=0) state.events[idx]=payload.event; else state.events.push(payload.event); renderSyscalls(); return;}
+      if(envelope.type==="llm-upsert"){const idx=state.exchanges.findIndex((evt)=>evt.id===payload.exchange.id); if(idx>=0) state.exchanges[idx]=payload.exchange; else state.exchanges.push(payload.exchange); renderLLM();}
     }
     async function refreshSnapshot(){
       try{
@@ -117,13 +163,13 @@ INDEX_HTML = """<!doctype html>
     }
     function connect(){
       const protocol=location.protocol==="https:"?"wss":"ws"; const ws=new WebSocket(`${protocol}://${location.host}/ws`);
-      ws.onopen=()=>connectionState.textContent="Connected";
-      ws.onclose=()=>{connectionState.textContent="Disconnected, retrying..."; setTimeout(connect,1000);};
+      ws.onopen=()=>{state.wsConnected=true; connectionState.textContent="Connected";};
+      ws.onclose=()=>{state.wsConnected=false; connectionState.textContent="Disconnected, retrying..."; setTimeout(connect,1000);};
       ws.onerror=()=>ws.close();
       ws.onmessage=(message)=>applyEnvelope(JSON.parse(message.data));
     }
     document.addEventListener("keydown",async(event)=>{if(!state.focusedId)return; if(event.key==="y") await decide(state.focusedId,"allow"); if(event.key==="n") await decide(state.focusedId,"deny");});
-    setInterval(refreshSnapshot, 1000);
+    setInterval(()=>{if(!state.wsConnected) refreshSnapshot();}, 1000);
     refreshSnapshot();
     connect();
   </script>

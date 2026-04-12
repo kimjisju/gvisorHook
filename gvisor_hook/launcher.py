@@ -18,7 +18,15 @@ import tty
 from contextlib import suppress
 from pathlib import Path
 
-from .bundle import write_bundle_config
+from .bundle import DATASET_PLAN_INSTRUCTIONS, write_bundle_config
+from .dataset import (
+    DatasetSessionPaths,
+    append_ndjson,
+    create_dataset_session,
+    default_dataset_root,
+    make_session_id,
+    record_terminal_chunk,
+)
 
 
 class ConsoleSocketServer:
@@ -84,7 +92,12 @@ def find_mitmdump_binary() -> Path:
     raise FileNotFoundError("Could not find mitmdump. Expected /home/kimjisu/download/mitmdump.")
 
 
-def relay_tty(master_fd: int, child: subprocess.Popen[bytes]) -> int:
+def relay_tty(
+    master_fd: int,
+    child: subprocess.Popen[bytes],
+    *,
+    dataset_session: DatasetSessionPaths | None = None,
+) -> int:
     stdin_fd = sys.stdin.fileno()
     stdout_fd = sys.stdout.fileno()
     old_tty = termios.tcgetattr(stdin_fd) if os.isatty(stdin_fd) else None
@@ -100,11 +113,17 @@ def relay_tty(master_fd: int, child: subprocess.Popen[bytes]) -> int:
                     break
                 if not data:
                     break
+                if dataset_session is not None:
+                    with suppress(Exception):
+                        record_terminal_chunk(dataset_session, stream="stdout", data=data)
                 os.write(stdout_fd, data)
             if stdin_fd in readable:
                 data = os.read(stdin_fd, 65536)
                 if not data:
                     break
+                if dataset_session is not None:
+                    with suppress(Exception):
+                        record_terminal_chunk(dataset_session, stream="stdin", data=data)
                 os.write(master_fd, data)
             if child.poll() is not None and not readable:
                 break
@@ -227,10 +246,19 @@ def spawn_mitmdump(
     listen_port: int,
     log_path: Path,
     llm_log_path: Path,
+    dataset_session: DatasetSessionPaths,
 ) -> subprocess.Popen[bytes]:
     addon_path = Path(__file__).resolve().parent / "mitm_addon.py"
+    repo_root = Path(__file__).resolve().parent.parent
     env = os.environ.copy()
     env["GVISOR_HOOK_LLM_LOG_PATH"] = str(llm_log_path)
+    env["GVISOR_HOOK_DATASET_SESSION_DIR"] = str(dataset_session.session_root)
+    env["GVISOR_HOOK_DATASET_ROOT"] = str(dataset_session.dataset_root)
+    env["GVISOR_HOOK_SESSION_ID"] = dataset_session.session_id
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        f"{repo_root}:{existing_pythonpath}" if existing_pythonpath else str(repo_root)
+    )
     mitm_log = log_path.open("a", encoding="utf-8")
     return subprocess.Popen(
         [
@@ -392,6 +420,12 @@ else:
     return bootstrap_dir
 
 
+def resolve_dataset_root(dataset_root: str | None) -> Path:
+    if dataset_root:
+        return Path(dataset_root).expanduser().resolve()
+    return default_dataset_root()
+
+
 def launch(args: argparse.Namespace) -> int:
     workdir = Path(args.workdir).resolve()
     if not workdir.is_dir():
@@ -404,9 +438,6 @@ def launch(args: argparse.Namespace) -> int:
     bundle_dir = runtime_dir / "bundle"
     broker_socket_path = approval_ipc_dir / "broker.sock"
     proxy_http_socket_path = runtime_dir / "proxy-http.sock"
-    broker_log_path = runtime_dir / "broker.log"
-    llm_log_path = runtime_dir / "llm.ndjson"
-    mitm_log_path = runtime_dir / "mitmproxy.log"
     console_socket_path = runtime_dir / "console.sock"
     runsc_root = runtime_dir / "runsc-root"
     debug_log_dir = runtime_dir / "runsc-logs"
@@ -414,6 +445,26 @@ def launch(args: argparse.Namespace) -> int:
     debug_log_dir.mkdir(parents=True, exist_ok=True)
 
     container_id = f"open-interpreter-{int(time.time())}"
+    dataset_root = resolve_dataset_root(getattr(args, "dataset_root", None))
+    plan_mode_enabled = not getattr(args, "no_plan_mode", False)
+    custom_instructions = DATASET_PLAN_INSTRUCTIONS if plan_mode_enabled else None
+    dataset_session = create_dataset_session(
+        dataset_root,
+        make_session_id(container_id),
+        {
+            "workdir": str(workdir),
+            "runtime_dir": str(runtime_dir),
+            "container_id": container_id,
+            "web_port": args.web_port,
+            "decision_timeout": args.decision_timeout,
+            "profile": "default.yaml",
+            "plan_mode_enabled": plan_mode_enabled,
+            "custom_instructions": custom_instructions,
+        },
+    )
+    broker_log_path = dataset_session.broker_log_path
+    llm_log_path = dataset_session.llm_ui_log_path
+    mitm_log_path = dataset_session.mitm_log_path
     host_ip = discover_host_ip()
     broker_tcp_port = reserve_tcp_port()
     mitm_tcp_port = reserve_tcp_port()
@@ -429,6 +480,7 @@ def launch(args: argparse.Namespace) -> int:
             mitm_tcp_port,
             mitm_log_path,
             llm_log_path,
+            dataset_session,
         )
         wait_for_tcp_ready("127.0.0.1", mitm_tcp_port, timeout=10)
         broker_proc = spawn_broker(
@@ -459,6 +511,8 @@ def launch(args: argparse.Namespace) -> int:
             hook_timeout_ms=int(args.decision_timeout * 1000),
             hook_warmup_ms=5000,
             hook_container_id=container_id,
+            profile="default.yaml",
+            custom_instructions=custom_instructions,
         )
         config_path = bundle_dir / "config.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -502,6 +556,7 @@ def launch(args: argparse.Namespace) -> int:
         print(f"Approval UI: http://127.0.0.1:{args.web_port}", file=sys.stderr)
         print("Sandbox proxy base: http://127.0.0.1:18080/openai/v1 (intercepted to Unix socket)", file=sys.stderr)
         print(f"LLM MITM: http://127.0.0.1:{mitm_tcp_port}", file=sys.stderr)
+        print(f"Dataset session: {dataset_session.session_root}", file=sys.stderr)
         print(f"runsc logs: {debug_log_dir}", file=sys.stderr)
         runsc_proc = subprocess.Popen(
             [
@@ -528,7 +583,7 @@ def launch(args: argparse.Namespace) -> int:
         master_fd = console_server.accept_master_fd_until_process_exit(
             timeout=15, child=runsc_proc
         )
-        return relay_tty(master_fd, runsc_proc)
+        return relay_tty(master_fd, runsc_proc, dataset_session=dataset_session)
     finally:
         if console_server is not None:
             console_server.close()
@@ -544,3 +599,16 @@ def launch(args: argparse.Namespace) -> int:
             with suppress(Exception):
                 mitm_proc.send_signal(signal.SIGTERM)
                 mitm_proc.wait(timeout=5)
+        with suppress(Exception):
+            append_ndjson(
+                dataset_session.session_index_path,
+                {
+                    "type": "session-ended",
+                    "payload": {
+                        "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "runsc_returncode": None if runsc_proc is None else runsc_proc.poll(),
+                        "broker_returncode": None if broker_proc is None else broker_proc.poll(),
+                        "mitm_returncode": None if mitm_proc is None else mitm_proc.poll(),
+                    },
+                },
+            )

@@ -112,12 +112,28 @@ class ApprovalBrokerTests(unittest.IsolatedAsyncioTestCase):
                 "url": "https://api.openai.com/v1/chat/completions",
                 "started_at": "2026-04-06T00:00:00Z",
                 "status": "completed",
+                "session_id": "session-1",
                 "model": "gpt-4o",
-                "request_summary": "model=gpt-4o; messages=2; tools=1",
-                "request_body": {"model": "gpt-4o", "messages": [{"role": "user", "content": "hello"}]},
+                "request_summary": "request_bytes=123; content_type=application/json",
+                "request_body": "{\"model\":\"gpt-4o\"}",
+                "request_body_bytes": 123,
+                "request_body_sha256": "abc123",
+                "request_headers_sha256": "hdr123",
+                "request_content_type": "application/json",
+                "request_headers_path": "/tmp/session/llm/llm-1/request_headers.raw",
+                "request_body_path": "/tmp/session/llm/llm-1/request_body.bin",
                 "response_status": 200,
-                "response_summary": "assistant: hi",
-                "response_body": {"choices": [{"message": {"role": "assistant", "content": "hi"}}]},
+                "response_summary": "response_bytes=456; content_type=text/event-stream",
+                "response_body": "data: {\"choices\":[]}",
+                "response_body_bytes": 456,
+                "response_body_sha256": "def456",
+                "response_headers_sha256": "hdr456",
+                "response_content_type": "text/event-stream",
+                "response_headers_path": "/tmp/session/llm/llm-1/response_headers.raw",
+                "response_body_path": "/tmp/session/llm/llm-1/response_body.bin",
+                "meta_path": "/tmp/session/llm/llm-1/meta.json",
+                "artifact_dir": "/tmp/session/llm/llm-1",
+                "is_stream": True,
                 "error": None,
             },
         }
@@ -127,4 +143,7 @@ class ApprovalBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(snapshot["payload"]["llm_exchanges"]), 1)
         exchange = snapshot["payload"]["llm_exchanges"][0]
         self.assertEqual(exchange["id"], "llm-1")
+        self.assertEqual(exchange["session_id"], "session-1")
         self.assertEqual(exchange["response_status"], 200)
+        self.assertEqual(exchange["request_body_path"], "/tmp/session/llm/llm-1/request_body.bin")
+        self.assertTrue(exchange["is_stream"])

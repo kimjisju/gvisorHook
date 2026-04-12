@@ -21,6 +21,13 @@ DEFAULT_ENV_ALLOWLIST_PREFIXES = (
 )
 
 
+DATASET_PLAN_INSTRUCTIONS = (
+    "DATASET CAPTURE MODE: For every non-trivial user request, expose a short visible PLAN section "
+    "before taking action. Keep the plan concise, factual, and directly relevant to the task. "
+    "Do not hide the plan inside code blocks. After the PLAN, continue normally and complete the task."
+)
+
+
 def build_process_env(
     home_dir: str,
     proxy_base_url: str,
@@ -84,22 +91,29 @@ def write_bundle_config(
     hook_timeout_ms: int | None = None,
     hook_warmup_ms: int | None = None,
     hook_container_id: str | None = None,
+    profile: str | None = None,
+    custom_instructions: str | None = None,
 ) -> Path:
     bundle_dir.mkdir(parents=True, exist_ok=True)
     (bundle_dir / "rootfs").mkdir(exist_ok=True)
     workdir = workdir.resolve()
+
+    process_args = [
+        "/usr/bin/python3",
+        "/tmp/open-interpreter/bin/interpreter",
+    ]
+    if profile:
+        process_args.extend(["--profile", profile])
+    if custom_instructions:
+        process_args.extend(["--custom_instructions", custom_instructions])
+    process_args.extend(["--api_base", proxy_base_url])
 
     config = {
         "ociVersion": "1.0.2",
         "process": {
             "terminal": True,
             "user": {"uid": 0, "gid": 0},
-            "args": [
-                "/usr/bin/python3",
-                "/tmp/open-interpreter/bin/interpreter",
-                "--api_base",
-                proxy_base_url,
-            ],
+            "args": process_args,
             "cwd": "/tmp/workspace",
             "env": build_process_env(
                 runtime_home_dir,
