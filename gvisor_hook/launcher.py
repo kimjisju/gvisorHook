@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
+import fcntl
 import os
 import select
 import shutil
@@ -11,6 +12,7 @@ import socket
 import struct
 import subprocess
 import sys
+import shlex
 import tempfile
 import termios
 import time
@@ -26,7 +28,24 @@ from .dataset import (
     default_dataset_root,
     make_session_id,
     record_terminal_chunk,
+    utc_now,
 )
+
+def _apply_winsize(master_fd: int, *, cols: int, rows: int) -> None:
+    # TIOCSWINSZ expects (rows, cols, xpixel, ypixel) as unsigned short.
+    buf = struct.pack("HHHH", rows, cols, 0, 0)
+    fcntl.ioctl(master_fd, termios.TIOCSWINSZ, buf)
+
+
+def sync_pty_winsize(master_fd: int) -> None:
+    try:
+        size = shutil.get_terminal_size(fallback=(120, 40))
+        cols = max(1, int(getattr(size, "columns", 120)))
+        rows = max(1, int(getattr(size, "lines", 40)))
+    except Exception:
+        cols, rows = 120, 40
+    with suppress(Exception):
+        _apply_winsize(master_fd, cols=cols, rows=rows)
 
 
 class ConsoleSocketServer:
@@ -70,7 +89,10 @@ class ConsoleSocketServer:
 
 
 def find_runsc_binary() -> Path:
+    repo_root = Path(__file__).resolve().parent.parent
     candidates = [
+        repo_root / "third_party" / "gvisor" / "bin" / "runsc-hook",
+        repo_root / "third_party" / "gvisor" / "bazel-bin" / "runsc" / "runsc_" / "runsc",
         Path("/home/kimjisu/gvisorHook/third_party/gvisor/bin/runsc-hook"),
         Path("/home/kimjisu/gvisorHook/third_party/gvisor/bazel-bin/runsc/runsc_/runsc"),
         Path(shutil.which("runsc") or ""),
@@ -103,6 +125,20 @@ def relay_tty(
     old_tty = termios.tcgetattr(stdin_fd) if os.isatty(stdin_fd) else None
     if old_tty is not None:
         tty.setraw(stdin_fd)
+    # Ensure TUI apps see a valid initial window size (gVisor can return 0x0
+    # otherwise, leading to a blank screen).
+    sync_pty_winsize(master_fd)
+    old_sigwinch = None
+    try:
+        old_sigwinch = signal.getsignal(signal.SIGWINCH)
+    except Exception:
+        old_sigwinch = None
+
+    def _on_winch(_signum: int, _frame: object | None = None) -> None:  # pragma: no cover
+        sync_pty_winsize(master_fd)
+
+    with suppress(Exception):
+        signal.signal(signal.SIGWINCH, _on_winch)
     try:
         while True:
             readable, _, _ = select.select([stdin_fd, master_fd], [], [], 0.1)
@@ -128,6 +164,9 @@ def relay_tty(
             if child.poll() is not None and not readable:
                 break
     finally:
+        with suppress(Exception):
+            if old_sigwinch is not None:
+                signal.signal(signal.SIGWINCH, old_sigwinch)
         if old_tty is not None:
             termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_tty)
         with suppress(OSError):
@@ -431,6 +470,35 @@ def launch(args: argparse.Namespace) -> int:
     if not workdir.is_dir():
         raise FileNotFoundError(f"workdir does not exist: {workdir}")
 
+    agent_argv: list[str] | None = None
+    raw_agent_cmd = getattr(args, "agent_cmd", None)
+    if raw_agent_cmd:
+        agent_argv = shlex.split(raw_agent_cmd)
+        if agent_argv and agent_argv[0] in {"codex", "/usr/local/bin/codex"}:
+            agent_argv = [
+                "/usr/bin/node",
+                "/usr/local/lib/node_modules/@openai/codex/bin/codex.js",
+                *agent_argv[1:],
+            ]
+    else:
+        prompt = getattr(args, "prompt", None)
+        if not prompt:
+            raise ValueError('Provide --agent-cmd or --prompt (for default "codex exec" mode).')
+        agent_argv = [
+            "/usr/bin/node",
+            "/usr/local/lib/node_modules/@openai/codex/bin/codex.js",
+            "exec",
+            "--skip-git-repo-check",
+            "-C",
+            "/tmp/workspace",
+        ]
+        codex_model = getattr(args, "codex_model", None)
+        if codex_model:
+            agent_argv.extend(["--model", codex_model])
+        if not getattr(args, "codex_no_json", False):
+            agent_argv.append("--json")
+        agent_argv.append(prompt)
+
     runtime_dir = make_runtime_dir(workdir)
     approval_ipc_dir = Path("/tmp") / f"gvisor-hook-{runtime_dir.name}"
     approval_ipc_dir.mkdir(parents=True, exist_ok=True)
@@ -440,9 +508,7 @@ def launch(args: argparse.Namespace) -> int:
     proxy_http_socket_path = runtime_dir / "proxy-http.sock"
     console_socket_path = runtime_dir / "console.sock"
     runsc_root = runtime_dir / "runsc-root"
-    debug_log_dir = runtime_dir / "runsc-logs"
     runsc_root.mkdir(parents=True, exist_ok=True)
-    debug_log_dir.mkdir(parents=True, exist_ok=True)
 
     container_id = f"open-interpreter-{int(time.time())}"
     dataset_root = resolve_dataset_root(getattr(args, "dataset_root", None))
@@ -462,6 +528,28 @@ def launch(args: argparse.Namespace) -> int:
             "custom_instructions": custom_instructions,
         },
     )
+    runsc_logs_dir = dataset_session.session_root / "runsc-logs"
+    runsc_logs_dir.mkdir(parents=True, exist_ok=True)
+    with suppress(Exception):
+        manifest = json.loads(dataset_session.manifest_path.read_text(encoding="utf-8"))
+        manifest.setdefault("logs", {}).update(
+            {
+                "runsc_logs_dir": str(runsc_logs_dir),
+                "runsc_debug_log_path": str(runsc_logs_dir / "debug"),
+                "runsc_user_log_path": str(runsc_logs_dir / "user.log"),
+            }
+        )
+        dataset_session.manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        append_ndjson(
+            dataset_session.session_index_path,
+            {
+                "type": "runsc-logs-configured",
+                "payload": {
+                    "configured_at": utc_now(),
+                    "runsc_logs_dir": str(runsc_logs_dir),
+                },
+            },
+        )
     broker_log_path = dataset_session.broker_log_path
     llm_log_path = dataset_session.llm_ui_log_path
     mitm_log_path = dataset_session.mitm_log_path
@@ -499,17 +587,56 @@ def launch(args: argparse.Namespace) -> int:
         wait_for_http_ready(args.web_port, timeout=10)
         resolv_path, hosts_path, nsswitch_path = write_runtime_network_files(runtime_dir)
         bootstrap_dir = write_bootstrap_files(runtime_dir)
+        # The sandbox uses host networking (via runsc `--network=host` plus an OCI spec
+        # without a network namespace), so loopback reaches the host-side broker.
+        proxy_base_url = f"http://127.0.0.1:{args.web_port}/openai/v1"
+        upstream_proxy_url = f"http://127.0.0.1:{mitm_tcp_port}"
+
+        # Codex CLI defaults to api.openai.com and may use websockets for the responses API.
+        # To guarantee broker/mitm capture (and avoid sandbox DNS issues), force:
+        # - base URL to the local broker reverse proxy
+        # - websockets off (use HTTP/SSE instead)
+        if agent_argv and len(agent_argv) >= 2 and agent_argv[1].endswith("/codex.js"):
+            # Codex's built-in `openai` provider currently prefers WebSocket transport,
+            # and `supports_websockets=false` may not disable it for that provider.
+            # To guarantee HTTP/SSE (so the mitmproxy addon can log full bodies),
+            # force a custom provider with websockets disabled.
+            #
+            # See: https://github.com/openai/codex/issues/13103
+            has_model_provider = any(token.startswith("model_provider=") for token in agent_argv)
+            has_custom_provider_base = any(
+                token.startswith("model_providers.openai_custom.base_url=")
+                or token.startswith('model_providers.openai_custom.base_url="')
+                for token in agent_argv
+            )
+            has_custom_provider_ws = any(
+                token.startswith("model_providers.openai_custom.supports_websockets=") for token in agent_argv
+            )
+            inject: list[str] = []
+            if not has_model_provider:
+                inject.extend(["-c", 'model_provider="openai_custom"'])
+            if not has_custom_provider_base:
+                inject.extend(["-c", f'model_providers.openai_custom.base_url="{proxy_base_url}"'])
+                inject.extend(["-c", 'model_providers.openai_custom.env_key="OPENAI_API_KEY"'])
+                inject.extend(["-c", 'model_providers.openai_custom.name="OpenAI (broker)"'])
+                inject.extend(["-c", "model_providers.openai_custom.requires_openai_auth=true"])
+            if not has_custom_provider_ws:
+                inject.extend(["-c", "model_providers.openai_custom.supports_websockets=false"])
+            if inject:
+                agent_argv = [agent_argv[0], agent_argv[1], *inject, *agent_argv[2:]]
         write_bundle_config(
             bundle_dir,
             workdir=workdir,
-            runtime_home_dir="/tmp/oi-home",
+            runtime_home_dir="/home",
             container_id=container_id,
             resolv_conf_path=str(resolv_path),
             hosts_path=str(hosts_path),
             nsswitch_conf_path=str(nsswitch_path),
-            proxy_base_url="http://127.0.0.1:18080/openai/v1",
+            proxy_base_url=proxy_base_url,
+            upstream_proxy_url=None,
+            agent_argv=agent_argv,
             hook_timeout_ms=int(args.decision_timeout * 1000),
-            hook_warmup_ms=5000,
+            hook_warmup_ms=20000,
             hook_container_id=container_id,
             profile="default.yaml",
             custom_instructions=custom_instructions,
@@ -548,25 +675,32 @@ def launch(args: argparse.Namespace) -> int:
             {
                 "GVISOR_HOOK_ADDR": f"127.0.0.1:{broker_tcp_port}",
                 "GVISOR_HOOK_TIMEOUT_MS": str(int(args.decision_timeout * 1000)),
-                "GVISOR_HOOK_WARMUP_MS": "5000",
+                "GVISOR_HOOK_WARMUP_MS": "20000",
                 "GVISOR_HOOK_CONTAINER_ID": container_id,
             }
         )
 
         print(f"Approval UI: http://127.0.0.1:{args.web_port}", file=sys.stderr)
-        print("Sandbox proxy base: http://127.0.0.1:18080/openai/v1 (intercepted to Unix socket)", file=sys.stderr)
-        print(f"LLM MITM: http://127.0.0.1:{mitm_tcp_port}", file=sys.stderr)
+        print(f"OpenAI base (broker): {proxy_base_url}", file=sys.stderr)
+        print(f"HTTP(S) proxy (mitm): {upstream_proxy_url}", file=sys.stderr)
         print(f"Dataset session: {dataset_session.session_root}", file=sys.stderr)
-        print(f"runsc logs: {debug_log_dir}", file=sys.stderr)
-        runsc_proc = subprocess.Popen(
+        print(f"runsc logs: {runsc_logs_dir}", file=sys.stderr)
+        runsc_cmd: list[str] = [
+            str(runsc_bin),
+            "--ignore-cgroups",
+            "--rootless",
+            "--network=host",
+            "--host-uds=all",
+            "--debug-log",
+            str(runsc_logs_dir / "debug"),
+        ]
+        if getattr(args, "runsc_strace", False):
+            runsc_cmd.append("--strace")
+            syscalls = (getattr(args, "runsc_strace_syscalls", "") or "").strip()
+            if syscalls:
+                runsc_cmd.extend(["--strace-syscalls", syscalls])
+        runsc_cmd.extend(
             [
-                str(runsc_bin),
-                "--ignore-cgroups",
-                "--rootless",
-                "--network=host",
-                "--host-uds=all",
-                "--debug-log",
-                str(debug_log_dir / "debug"),
                 "--root",
                 str(runsc_root),
                 "run",
@@ -575,11 +709,11 @@ def launch(args: argparse.Namespace) -> int:
                 "--console-socket",
                 str(console_socket_path),
                 "--user-log",
-                str(debug_log_dir / "user.log"),
+                str(runsc_logs_dir / "user.log"),
                 container_id,
-            ],
-            env=env,
+            ]
         )
+        runsc_proc = subprocess.Popen(runsc_cmd, env=env)
         master_fd = console_server.accept_master_fd_until_process_exit(
             timeout=15, child=runsc_proc
         )

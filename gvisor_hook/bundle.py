@@ -32,6 +32,7 @@ def build_process_env(
     home_dir: str,
     proxy_base_url: str,
     *,
+    upstream_proxy_url: str | None = None,
     hook_addr: str | None = None,
     hook_socket_path: str | None = None,
     hook_event_log_path: str | None = None,
@@ -45,15 +46,28 @@ def build_process_env(
         "XDG_CACHE_HOME": f"{home_dir}/.cache",
         "XDG_CONFIG_HOME": f"{home_dir}/.config",
         "PYTHONUNBUFFERED": "1",
-        "PYTHONPATH": "/tmp/bootstrap:/tmp/open-interpreter/site-packages",
+        #"PYTHONPATH": "/tmp/bootstrap:/tmp/open-interpreter/site-packages",
+        "PYTHONPATH": "/tmp/bootstrap",
         "OPENAI_BASE_URL": proxy_base_url,
         "OPENAI_API_BASE": proxy_base_url,
         "LITELLM_LOCAL_MODEL_COST_MAP": "true",
         "TERM": os.environ.get("TERM", "xterm-256color"),
         "COLORTERM": os.environ.get("COLORTERM", "truecolor"),
-        "PATH": "/tmp/open-interpreter/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        # Some TUI apps (including Codex) fall back to these when window-size ioctls
+        # are unavailable in restricted sandboxes.
+        "COLUMNS": os.environ.get("COLUMNS", "120"),
+        "LINES": os.environ.get("LINES", "40"),
+        #"PATH": "/tmp/open-interpreter/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "LANG": os.environ.get("LANG", "C.UTF-8"),
     }
+    if upstream_proxy_url:
+        # Ensure Codex (and other clients) reach the network through the mitmproxy tap,
+        # including websocket connections, without relying on container DNS.
+        env.setdefault("HTTP_PROXY", upstream_proxy_url)
+        env.setdefault("HTTPS_PROXY", upstream_proxy_url)
+        env.setdefault("ALL_PROXY", upstream_proxy_url)
+        env.setdefault("NO_PROXY", "127.0.0.1,localhost")
     if hook_addr:
         env["GVISOR_HOOK_ADDR"] = hook_addr
     if hook_socket_path:
@@ -84,6 +98,8 @@ def write_bundle_config(
     hosts_path: str,
     nsswitch_conf_path: str,
     proxy_base_url: str,
+    upstream_proxy_url: str | None = None,
+    agent_argv: list[str] | None = None,
     hook_addr: str | None = None,
     hook_socket_path: str | None = None,
     hook_event_log_path: str | None = None,
@@ -98,15 +114,12 @@ def write_bundle_config(
     (bundle_dir / "rootfs").mkdir(exist_ok=True)
     workdir = workdir.resolve()
 
-    process_args = [
-        "/usr/bin/python3",
-        "/tmp/open-interpreter/bin/interpreter",
-    ]
-    if profile:
-        process_args.extend(["--profile", profile])
-    if custom_instructions:
-        process_args.extend(["--custom_instructions", custom_instructions])
-    process_args.extend(["--api_base", proxy_base_url])
+    process_args = agent_argv or ["/usr/local/bin/codex"]
+    # if profile:
+    #     process_args.extend(["--profile", profile])
+    # if custom_instructions:
+    #     process_args.extend(["--custom_instructions", custom_instructions])
+    # process_args.extend(["--api_base", proxy_base_url])
 
     config = {
         "ociVersion": "1.0.2",
@@ -118,6 +131,7 @@ def write_bundle_config(
             "env": build_process_env(
                 runtime_home_dir,
                 proxy_base_url,
+                upstream_proxy_url=upstream_proxy_url,
                 hook_addr=hook_addr,
                 hook_socket_path=hook_socket_path,
                 hook_event_log_path=hook_event_log_path,
@@ -136,15 +150,19 @@ def write_bundle_config(
         },
         "root": {"path": "/", "readonly": True},
         "hostname": container_id,
-        "mounts": [
-            {"destination": "/proc", "type": "proc", "source": "proc", "options": ["nosuid", "noexec", "nodev"]},
-            {"destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "mode=1777", "size=268435456"]},
-            {"destination": "/etc/resolv.conf", "type": "bind", "source": resolv_conf_path, "options": ["bind", "ro"]},
-            {"destination": "/etc/hosts", "type": "bind", "source": hosts_path, "options": ["bind", "ro"]},
-            {"destination": "/etc/nsswitch.conf", "type": "bind", "source": nsswitch_conf_path, "options": ["bind", "ro"]},
-            {"destination": "/tmp/workspace", "type": "bind", "source": str(workdir), "options": ["rbind", "rw"]},
-            {"destination": "/tmp/open-interpreter/bin/interpreter", "type": "bind", "source": "/home/kimjisu/.local/bin/interpreter", "options": ["bind", "ro"]},
-            {"destination": "/tmp/open-interpreter/site-packages", "type": "bind", "source": "/home/kimjisu/.local/lib/python3.10/site-packages", "options": ["rbind", "ro"]},
+	        "mounts": [
+	            {"destination": "/proc", "type": "proc", "source": "proc", "options": ["nosuid", "noexec", "nodev"]},
+	            {"destination": "/tmp", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "mode=1777", "size=268435456"]},
+	            {"destination": "/home", "type": "tmpfs", "source": "tmpfs", "options": ["nosuid", "nodev", "mode=0777", "size=268435456"]},
+	            {"destination": "/etc/resolv.conf", "type": "bind", "source": resolv_conf_path, "options": ["bind", "ro"]},
+	            {"destination": "/etc/hosts", "type": "bind", "source": hosts_path, "options": ["bind", "ro"]},
+	            {"destination": "/etc/nsswitch.conf", "type": "bind", "source": nsswitch_conf_path, "options": ["bind", "ro"]},
+	            {"destination": "/tmp/workspace", "type": "bind", "source": str(workdir), "options": ["rbind", "rw"]},
+                {"destination": "/usr/bin/git", "type": "bind", "source": "/usr/bin/git", "options": ["bind", "ro"]},
+                {"destination": "/usr/bin/getconf", "type": "bind", "source": "/usr/bin/getconf", "options": ["bind", "ro"]},
+                {"destination": "/usr/bin/lsb_release", "type": "bind", "source": "/usr/bin/lsb_release", "options": ["bind", "ro"]},
+	            #{"destination": "/tmp/open-interpreter/bin/interpreter", "type": "bind", "source": "/home/kimjisu/.local/bin/interpreter", "options": ["bind", "ro"]},
+            #{"destination": "/tmp/open-interpreter/site-packages", "type": "bind", "source": "/home/kimjisu/.local/lib/python3.10/site-packages", "options": ["rbind", "ro"]},
         ],
         "linux": {
             "namespaces": [
@@ -152,7 +170,6 @@ def write_bundle_config(
                 {"type": "ipc"},
                 {"type": "uts"},
                 {"type": "mount"},
-                {"type": "network"},
             ]
         },
     }

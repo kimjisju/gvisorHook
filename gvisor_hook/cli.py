@@ -12,11 +12,42 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python3 -m gvisor_hook")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    launch_parser = subparsers.add_parser("launch", help="launch Open Interpreter inside gVisor")
+    launch_parser = subparsers.add_parser("launch", help="launch an agent inside gVisor")
+    launch_parser.add_argument(
+        "--agent-cmd",
+        default=None,
+        help='Command to run inside the sandbox. If it contains spaces, it will be shell-split '
+        '(e.g. --agent-cmd "codex exec --json \\"say hi\\"" or --agent-cmd "python3 -c \\"print(123)\\"").',
+    )
+    launch_parser.add_argument(
+        "--prompt",
+        default=None,
+        help="Convenience prompt for Codex non-interactive mode. Used only when --agent-cmd is not provided.",
+    )
+    launch_parser.add_argument(
+        "--codex-model",
+        default=None,
+        help='Codex model name (passed to "codex exec --model ..."). Used only when --agent-cmd is not provided.',
+    )
+    launch_parser.add_argument(
+        "--codex-no-json",
+        action="store_true",
+        help='Disable passing "--json" to codex exec. Used only when --agent-cmd is not provided.',
+    )
     launch_parser.add_argument("--workdir", required=True)
     launch_parser.add_argument("--web-port", type=int, default=8080)
     launch_parser.add_argument("--decision-timeout", type=float, default=30.0)
     launch_parser.add_argument("--runsc-bin", default=None)
+    launch_parser.add_argument(
+        "--runsc-strace",
+        action="store_true",
+        help="Enable gVisor runsc syscall tracing (writes into the runsc debug log).",
+    )
+    launch_parser.add_argument(
+        "--runsc-strace-syscalls",
+        default="",
+        help='Comma-separated list of syscalls to trace (requires --runsc-strace). Empty means "all".',
+    )
     launch_parser.add_argument("--dataset-root", default=None)
     launch_parser.add_argument("--no-plan-mode", action="store_true")
 

@@ -213,17 +213,27 @@ class ApprovalBroker:
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
         if self.socket_path.exists():
             self.socket_path.unlink()
-        self._ipc_server = await asyncio.start_unix_server(
-            self._handle_ipc_client,
-            path=str(self.socket_path),
-        )
-        self.socket_path.chmod(0o777)
+        try:
+            self._ipc_server = await asyncio.start_unix_server(
+                self._handle_ipc_client,
+                path=str(self.socket_path),
+            )
+            self.socket_path.chmod(0o777)
+        except PermissionError as exc:
+            # Some restricted environments disallow AF_UNIX sockets. Allow the broker
+            # to operate in TCP-only mode when configured.
+            LOG.warning("Unix IPC disabled (permission error): %s", exc)
+            self._ipc_server = None
         if self.tcp_host and self.tcp_port:
             self._tcp_server = await asyncio.start_server(
                 self._handle_ipc_client,
                 host=self.tcp_host,
                 port=self.tcp_port,
             )
+            sockets = getattr(self._tcp_server, "sockets", None)
+            if sockets:
+                with suppress(Exception):
+                    self.tcp_port = int(sockets[0].getsockname()[1])
         if self.event_log_path is not None:
             self.event_log_path.parent.mkdir(parents=True, exist_ok=True)
             self.event_log_path.touch(exist_ok=True)
@@ -236,6 +246,8 @@ class ApprovalBroker:
             self._start_task(self._poll_event_log())
         if self.llm_log_path is not None:
             self._start_task(self._poll_llm_log())
+        if self._ipc_server is None and self._tcp_server is None:
+            raise RuntimeError("broker has no usable IPC backend (unix and tcp both unavailable)")
 
     async def stop(self) -> None:
         for task in list(self._tasks):
@@ -502,6 +514,8 @@ def _install_routes(app: web.Application) -> None:
             for key, value in request.headers.items()
             if key.lower() not in excluded
         }
+        headers.pop("Accept-Encoding", None)
+        headers["Accept-Encoding"] = "identity"
         body = await request.read()
         client: ClientSession = app["http_client"]
         request_kwargs: dict[str, Any] = {
