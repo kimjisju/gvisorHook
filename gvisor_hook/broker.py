@@ -11,7 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from aiohttp import ClientSession, ClientTimeout, web
+from aiohttp import web
 
 from .models import BrokerEnvelope, LLMExchange, SyscallEvent
 
@@ -502,51 +502,11 @@ def _install_routes(app: web.Application) -> None:
             raise web.HTTPNotFound(text=f"pending event {event_id} not found")
         return web.json_response({"ok": True})
 
-    async def openai_proxy(request: web.Request) -> web.StreamResponse:
-        tail = request.match_info.get("tail", "")
-        target = f"https://api.openai.com/{tail}"
-        if request.query_string:
-            target = f"{target}?{request.query_string}"
-
-        excluded = {"host", "content-length"}
-        headers = {
-            key: value
-            for key, value in request.headers.items()
-            if key.lower() not in excluded
-        }
-        headers.pop("Accept-Encoding", None)
-        headers["Accept-Encoding"] = "identity"
-        body = await request.read()
-        client: ClientSession = app["http_client"]
-        request_kwargs: dict[str, Any] = {
-            "method": request.method,
-            "url": target,
-            "headers": headers,
-            "data": body if body else None,
-            "allow_redirects": False,
-        }
-        llm_proxy_url = app["llm_proxy_url"]
-        if llm_proxy_url:
-            request_kwargs["proxy"] = llm_proxy_url
-            request_kwargs["ssl"] = False
-        upstream = await client.request(**request_kwargs)
-        response = web.StreamResponse(status=upstream.status, reason=upstream.reason)
-        for key, value in upstream.headers.items():
-            if key.lower() not in {"content-length", "transfer-encoding", "content-encoding", "connection"}:
-                response.headers[key] = value
-        await response.prepare(request)
-        async for chunk in upstream.content.iter_chunked(65536):
-            await response.write(chunk)
-        await response.write_eof()
-        await upstream.release()
-        return response
-
     app.router.add_get("/", index)
     app.router.add_get("/api/health", health)
     app.router.add_get("/api/events", events_handler)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_post("/api/events/{event_id}/decision", decide_handler)
-    app.router.add_route("*", "/openai/{tail:.*}", openai_proxy)
 
 
 async def create_app(
@@ -558,7 +518,6 @@ async def create_app(
     event_log_path: Path | None = None,
     decision_dir: Path | None = None,
     llm_log_path: Path | None = None,
-    llm_proxy_url: str | None = None,
 ) -> web.Application:
     broker = ApprovalBroker(
         socket_path=socket_path,
@@ -572,12 +531,9 @@ async def create_app(
     await broker.start()
     app = web.Application()
     app["broker"] = broker
-    app["llm_proxy_url"] = llm_proxy_url
-    app["http_client"] = ClientSession(timeout=ClientTimeout(total=None))
 
     async def on_cleanup(_: web.Application) -> None:
         await broker.stop()
-        await app["http_client"].close()
 
     app.on_cleanup.append(on_cleanup)
     _install_routes(app)
@@ -594,7 +550,6 @@ async def serve(args: argparse.Namespace) -> None:
         event_log_path=Path(args.event_log_path) if args.event_log_path else None,
         decision_dir=Path(args.decision_dir) if args.decision_dir else None,
         llm_log_path=Path(args.llm_log_path) if args.llm_log_path else None,
-        llm_proxy_url=args.llm_proxy_url,
     )
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
@@ -617,12 +572,10 @@ async def serve(args: argparse.Namespace) -> None:
     if args.tcp_host and args.tcp_port:
         approval_endpoints.append(f"tcp://{args.tcp_host}:{args.tcp_port}")
     approval_endpoints.append(f"unix://{args.socket_path}")
-    mitm_text = args.llm_proxy_url if args.llm_proxy_url else "disabled"
     LOG.info(
-        "Broker ready on %s; approval IPC on %s; llm mitm on %s",
+        "Broker ready on %s; approval IPC on %s",
         ", ".join(f"http://{host}:{args.web_port}" for host in hosts),
         ", ".join(approval_endpoints),
-        mitm_text,
     )
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()

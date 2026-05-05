@@ -29,7 +29,7 @@ def ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def write_json(path: Path, payload: dict[str, Any]) -> None:
+def write_json(path: Path, payload: Any) -> None:
     ensure_parent(path)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -246,8 +246,8 @@ def flow_artifact_paths(session: DatasetSessionPaths, flow_id: str) -> dict[str,
     return {
         "flow_dir": flow_dir,
         "request_headers_path": flow_dir / "request_headers.raw",
-        "request_body_path": flow_dir / "request_body.bin",
+        "request_body_path": flow_dir / "request_body.json",
         "response_headers_path": flow_dir / "response_headers.raw",
-        "response_body_path": flow_dir / "response_body.bin",
+        "response_body_path": flow_dir / "response_body.json",
         "meta_path": flow_dir / "meta.json",
     }

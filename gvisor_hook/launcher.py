@@ -5,6 +5,7 @@ import ipaddress
 import json
 import fcntl
 import os
+import re
 import select
 import shutil
 import signal
@@ -105,13 +106,266 @@ def find_runsc_binary() -> Path:
 
 def find_mitmdump_binary() -> Path:
     candidates = [
+        Path.home() / "download" / "mitmdump",
         Path("/home/kimjisu/download/mitmdump"),
-        Path(shutil.which("mitmdump") or ""),
     ]
+    resolved = shutil.which("mitmdump")
+    if resolved:
+        candidates.append(Path(resolved))
     for candidate in candidates:
-        if candidate and candidate.exists():
+        if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate
     raise FileNotFoundError("Could not find mitmdump. Expected /home/kimjisu/download/mitmdump.")
+
+
+def check_mitmdump_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [*command, "--version"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+
+def iter_mitmdump_python_fallbacks(mitmdump_bin: Path) -> list[Path]:
+    try:
+        with mitmdump_bin.open("r", encoding="utf-8") as fh:
+            first_line = fh.readline().strip()
+    except (OSError, UnicodeDecodeError):
+        return []
+    if not first_line.startswith("#!"):
+        return []
+    parts = shlex.split(first_line[2:].strip())
+    if not parts:
+        return []
+    interpreter = Path(parts[0]).name
+    if interpreter == "env" and len(parts) > 1:
+        interpreter = parts[1]
+    if Path(interpreter).name != "python3":
+        return []
+
+    fallbacks: list[Path] = []
+    for name in ("python3.10", "python3.11"):
+        resolved = shutil.which(name)
+        if resolved:
+            fallbacks.append(Path(resolved).resolve())
+    return fallbacks
+
+
+def find_mitmdump_command() -> list[str]:
+    mitmdump_bin = find_mitmdump_binary()
+    direct_command = [str(mitmdump_bin)]
+    direct_result = check_mitmdump_command(direct_command)
+    if direct_result.returncode == 0:
+        return direct_command
+
+    for python_bin in iter_mitmdump_python_fallbacks(mitmdump_bin):
+        fallback_command = [str(python_bin), str(mitmdump_bin)]
+        fallback_result = check_mitmdump_command(fallback_command)
+        if fallback_result.returncode == 0:
+            return fallback_command
+
+    output = (direct_result.stdout + direct_result.stderr).strip()
+    raise RuntimeError(f"mitmdump is installed but failed to start:\n{output}")
+
+
+def find_mitmproxy_ca_cert() -> Path:
+    cert_path = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
+    if cert_path.is_file():
+        return cert_path.resolve()
+    raise FileNotFoundError(
+        f"Could not find mitmproxy CA certificate at {cert_path}. "
+        "Start mitmdump once so it can generate its CA files, then retry."
+    )
+
+
+def parse_shebang_command(command_path: Path) -> list[str]:
+    try:
+        with command_path.open("r", encoding="utf-8") as fh:
+            first_line = fh.readline().strip()
+    except (OSError, UnicodeDecodeError):
+        return []
+    if not first_line.startswith("#!"):
+        return []
+    return shlex.split(first_line[2:].strip())
+
+
+def resolve_path_executable(name: str, *, preferred_dirs: list[Path] | None = None) -> Path | None:
+    for directory in preferred_dirs or []:
+        candidate = (directory / name).resolve()
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    resolved = shutil.which(name)
+    if not resolved:
+        return None
+    path = Path(resolved).resolve()
+    if path.is_file() and os.access(path, os.X_OK):
+        return path
+    return None
+
+
+def resolve_env_interpreter_from_shebang(
+    command_path: Path,
+    *,
+    preferred_dirs: list[Path] | None = None,
+) -> Path | None:
+    parts = parse_shebang_command(command_path)
+    if not parts or Path(parts[0]).name != "env":
+        return None
+    for token in parts[1:]:
+        if token.startswith("-") or "=" in token:
+            continue
+        resolved = resolve_path_executable(token, preferred_dirs=preferred_dirs)
+        if not resolved:
+            raise FileNotFoundError(
+                f"Could not find shebang interpreter '{token}' required by {command_path} in PATH."
+            )
+        return resolved
+    return None
+
+
+def shell_wrapper_uses_node(command_path: Path) -> bool:
+    parts = parse_shebang_command(command_path)
+    if not parts or Path(parts[0]).name not in {"sh", "bash", "dash"}:
+        return False
+    try:
+        content = command_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return bool(re.search(r"(?m)^\s*(?:exec\s+)?node(?:\s|$)", content))
+
+
+def resolve_node_for_shell_wrapper(
+    command_path: Path,
+    *,
+    preferred_dirs: list[Path] | None = None,
+) -> Path | None:
+    if not shell_wrapper_uses_node(command_path):
+        return None
+    for name in ("node", "nodejs"):
+        resolved = resolve_path_executable(name, preferred_dirs=preferred_dirs)
+        if resolved is not None:
+            return resolved
+    raise FileNotFoundError(
+        f"{command_path} is a shell wrapper that runs 'node', but no executable node was found in PATH."
+    )
+
+
+def iter_config_dir_candidates(agent_name: str, home_dir: Path) -> list[Path]:
+    return [
+        home_dir / f".{agent_name}",
+        home_dir / agent_name,
+        home_dir / ".config" / agent_name,
+    ]
+
+
+def resolve_config_mount(agent_name: str, runtime_home_dir: str) -> dict[str, object] | None:
+    home_dir = Path.home()
+    for candidate in iter_config_dir_candidates(agent_name, home_dir):
+        if candidate.is_dir():
+            try:
+                relative = candidate.relative_to(home_dir)
+            except ValueError:
+                relative = Path(".config") / agent_name
+            return {
+                "destination": f"{runtime_home_dir}/{relative.as_posix()}",
+                "type": "bind",
+                "source": str(candidate),
+                "options": ["rbind", "rw"],
+            }
+    return None
+
+
+def find_node_modules_root(path: Path) -> Path | None:
+    for parent in [path.parent, *path.parents]:
+        if parent.name == "node_modules":
+            return parent
+    return None
+
+
+def resolve_agent_argv_and_mounts(
+    agent_argv: list[str] | None,
+    runtime_home_dir: str,
+) -> tuple[list[str] | None, list[dict[str, object]]]:
+    if not agent_argv:
+        return agent_argv, []
+
+    command = agent_argv[0]
+    resolved = command if Path(command).is_absolute() else shutil.which(command)
+    if not resolved:
+        return agent_argv, []
+
+    resolved_command = Path(resolved)
+    host_command = resolved_command.resolve()
+    preferred_interpreter_dirs = [resolved_command.parent.resolve()]
+    node_modules_root = find_node_modules_root(host_command)
+    container_bin_dir = "/tmp/agent/bin"
+    if node_modules_root is not None:
+        container_command = f"/tmp/agent/node_modules/{host_command.relative_to(node_modules_root).as_posix()}"
+    else:
+        container_command = f"{container_bin_dir}/{host_command.name}"
+    mounts: list[dict[str, object]] = []
+
+    if parse_shebang_command(host_command):
+        mounts.append(
+            {
+                "destination": container_bin_dir,
+                "type": "bind",
+                "source": str(host_command.parent),
+                "options": ["rbind", "ro"],
+            }
+        )
+        if node_modules_root is not None:
+            mounts.append(
+                {
+                    "destination": "/tmp/agent/node_modules",
+                    "type": "bind",
+                    "source": str(node_modules_root),
+                    "options": ["rbind", "ro"],
+                }
+            )
+    else:
+        mounts.append(
+            {
+                "destination": container_command,
+                "type": "bind",
+                "source": str(host_command),
+                "options": ["bind", "ro"],
+            }
+        )
+
+    env_interpreter = resolve_env_interpreter_from_shebang(
+        host_command,
+        preferred_dirs=preferred_interpreter_dirs,
+    )
+    if env_interpreter is not None and env_interpreter.parent != host_command.parent:
+        mounts.append(
+            {
+                "destination": f"{container_bin_dir}/{env_interpreter.name}",
+                "type": "bind",
+                "source": str(env_interpreter),
+                "options": ["bind", "ro"],
+            }
+        )
+    shell_wrapper_node = resolve_node_for_shell_wrapper(
+        host_command,
+        preferred_dirs=preferred_interpreter_dirs,
+    )
+    if shell_wrapper_node is not None and shell_wrapper_node.parent != host_command.parent:
+        mounts.append(
+            {
+                "destination": f"{container_bin_dir}/node",
+                "type": "bind",
+                "source": str(shell_wrapper_node),
+                "options": ["bind", "ro"],
+            }
+        )
+
+    config_mount = resolve_config_mount(Path(command).name, runtime_home_dir)
+    if config_mount is not None:
+        mounts.append(config_mount)
+
+    return [container_command, *agent_argv[1:]], mounts
 
 
 def relay_tty(
@@ -190,9 +444,31 @@ def wait_for_http_ready(port: int, timeout: float) -> None:
     raise RuntimeError(f"broker did not become ready on port {port}")
 
 
-def wait_for_tcp_ready(host: str, port: int, timeout: float) -> None:
+def read_log_tail(log_path: Path, max_chars: int = 4000) -> str:
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"<could not read {log_path}: {exc}>"
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]
+
+
+def wait_for_tcp_ready(
+    host: str,
+    port: int,
+    timeout: float,
+    child: subprocess.Popen[bytes] | None = None,
+    log_path: Path | None = None,
+    service_name: str = "service",
+) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if child is not None and child.poll() is not None:
+            message = f"{service_name} exited before becoming ready on {host}:{port} (exit {child.returncode})"
+            if log_path is not None:
+                message += f"\n\nLast log output from {log_path}:\n{read_log_tail(log_path).rstrip()}"
+            raise RuntimeError(message)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.settimeout(1)
@@ -202,7 +478,10 @@ def wait_for_tcp_ready(host: str, port: int, timeout: float) -> None:
             time.sleep(0.2)
         finally:
             sock.close()
-    raise RuntimeError(f"service did not become ready on {host}:{port}")
+    message = f"{service_name} did not become ready on {host}:{port}"
+    if log_path is not None:
+        message += f"\n\nLast log output from {log_path}:\n{read_log_tail(log_path).rstrip()}"
+    raise RuntimeError(message)
 
 
 def discover_host_ip() -> str:
@@ -234,7 +513,6 @@ def spawn_broker(
     event_log_path: Path | None,
     decision_dir: Path | None,
     llm_log_path: Path | None,
-    llm_proxy_url: str | None,
 ) -> subprocess.Popen[bytes]:
     command = [
         sys.executable,
@@ -267,8 +545,6 @@ def spawn_broker(
         )
     if llm_log_path is not None:
         command.extend(["--llm-log-path", str(llm_log_path)])
-    if llm_proxy_url is not None:
-        command.extend(["--llm-proxy-url", llm_proxy_url])
     log_path.parent.mkdir(parents=True, exist_ok=True)
     broker_log = log_path.open("a", encoding="utf-8")
     return subprocess.Popen(
@@ -281,7 +557,7 @@ def spawn_broker(
 
 
 def spawn_mitmdump(
-    mitmdump_bin: Path,
+    mitmdump_command: list[str],
     listen_port: int,
     log_path: Path,
     llm_log_path: Path,
@@ -298,21 +574,26 @@ def spawn_mitmdump(
     env["PYTHONPATH"] = (
         f"{repo_root}:{existing_pythonpath}" if existing_pythonpath else str(repo_root)
     )
+    mitmdump_args = [
+        *mitmdump_command,
+        "--listen-host",
+        "127.0.0.1",
+        "--listen-port",
+        str(listen_port),
+        "--set",
+        "block_global=false",
+        "--set",
+        "termlog_verbosity=warn",
+    ]
+    ignore_hosts = os.environ.get("GVISOR_HOOK_MITM_IGNORE_HOSTS", "")
+    ignore_hosts_set = [host.strip() for host in ignore_hosts.split(",") if host.strip()]
+    if ignore_hosts_set:
+        ignore_hosts_pattern = "|".join(re.escape(host) for host in ignore_hosts_set)
+        mitmdump_args.extend(["--ignore-hosts", f"^(?:{ignore_hosts_pattern})(?::\\d+)?$"])
+    mitmdump_args.extend(["-s", str(addon_path)])
     mitm_log = log_path.open("a", encoding="utf-8")
     return subprocess.Popen(
-        [
-            str(mitmdump_bin),
-            "--listen-host",
-            "127.0.0.1",
-            "--listen-port",
-            str(listen_port),
-            "--set",
-            "block_global=false",
-            "--set",
-            "termlog_verbosity=warn",
-            "-s",
-            str(addon_path),
-        ],
+        mitmdump_args,
         cwd=str(Path(__file__).resolve().parent.parent),
         env=env,
         stdin=subprocess.DEVNULL,
@@ -376,93 +657,20 @@ def write_runtime_network_files(runtime_dir: Path) -> tuple[Path, Path, Path]:
     return resolv_path, hosts_path, nsswitch_path
 
 
-def write_bootstrap_files(runtime_dir: Path) -> Path:
-    bootstrap_dir = runtime_dir / "bootstrap"
-    bootstrap_dir.mkdir(parents=True, exist_ok=True)
-    sitecustomize_path = bootstrap_dir / "sitecustomize.py"
-    sitecustomize_path.write_text(
-        """from __future__ import annotations
-
-import os
-import socket
-from pathlib import Path
-
-TARGET = Path("/tmp/host-run/proxy-http.sock")
-OPENAI_PROXY_HOST = "127.0.0.1"
-OPENAI_PROXY_PORT = 18080
-
-
-def log(message: str) -> None:
-    try:
-        with open("/tmp/host-run/python-proxy.log", "a", encoding="utf-8") as fh:
-            fh.write(message + "\\n")
-    except OSError:
-        pass
-
-
-def install_unix_socket_proxy() -> None:
-    original_create_connection = socket.create_connection
-
-    def create_connection(address, timeout=None, source_address=None):
-        try:
-            host, port = address
-        except Exception:
-            return original_create_connection(address, timeout, source_address)
-        if host == OPENAI_PROXY_HOST and int(port) == OPENAI_PROXY_PORT:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.settimeout(timeout)
-            sock.connect(str(TARGET))
-            return sock
-        return original_create_connection(address, timeout, source_address)
-
-    socket.create_connection = create_connection
-
-    try:
-        from httpcore._backends.sync import SyncBackend, SyncStream
-    except Exception as exc:  # pragma: no cover
-        log(f"httpcore import failed, stdlib socket patch still active: {exc!r}")
-        return
-
-    original_connect_tcp = SyncBackend.connect_tcp
-
-    def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
-        if host == OPENAI_PROXY_HOST and int(port) == OPENAI_PROXY_PORT:
-            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            sock.settimeout(timeout)
-            sock.connect(str(TARGET))
-            return SyncStream(sock)
-        return original_connect_tcp(
-            self,
-            host,
-            port,
-            timeout=timeout,
-            local_address=local_address,
-            socket_options=socket_options,
-        )
-
-    SyncBackend.connect_tcp = connect_tcp
-    log(f"installed unix socket proxy for {OPENAI_PROXY_HOST}:{OPENAI_PROXY_PORT} -> {TARGET}")
-
-
-if TARGET.exists():
-    install_unix_socket_proxy()
-else:
-    log(f"unix socket target missing: {TARGET}")
-""",
-        encoding="utf-8",
-    )
-    diagnostics_path = bootstrap_dir / "README.txt"
-    diagnostics_path.write_text(
-        "Bootstrap files mounted into the sandbox. sitecustomize.py installs a Unix socket transport for OpenAI proxy calls.\\n",
-        encoding="utf-8",
-    )
-    return bootstrap_dir
-
 
 def resolve_dataset_root(dataset_root: str | None) -> Path:
     if dataset_root:
         return Path(dataset_root).expanduser().resolve()
     return default_dataset_root()
+
+
+def agent_command_name(agent_argv: list[str]) -> str:
+    if not agent_argv:
+        return "agent"
+    command_name = Path(agent_argv[0]).name
+    if command_name in {"python", "python3", "node", "nodejs"} and len(agent_argv) > 1:
+        return Path(agent_argv[1]).name
+    return command_name or "agent"
 
 
 def launch(args: argparse.Namespace) -> int:
@@ -474,19 +682,12 @@ def launch(args: argparse.Namespace) -> int:
     raw_agent_cmd = getattr(args, "agent_cmd", None)
     if raw_agent_cmd:
         agent_argv = shlex.split(raw_agent_cmd)
-        if agent_argv and agent_argv[0] in {"codex", "/usr/local/bin/codex"}:
-            agent_argv = [
-                "/usr/bin/node",
-                "/usr/local/lib/node_modules/@openai/codex/bin/codex.js",
-                *agent_argv[1:],
-            ]
     else:
         prompt = getattr(args, "prompt", None)
         if not prompt:
             raise ValueError('Provide --agent-cmd or --prompt (for default "codex exec" mode).')
         agent_argv = [
-            "/usr/bin/node",
-            "/usr/local/lib/node_modules/@openai/codex/bin/codex.js",
+            "codex",
             "exec",
             "--skip-git-repo-check",
             "-C",
@@ -510,7 +711,9 @@ def launch(args: argparse.Namespace) -> int:
     runsc_root = runtime_dir / "runsc-root"
     runsc_root.mkdir(parents=True, exist_ok=True)
 
-    container_id = f"open-interpreter-{int(time.time())}"
+    agent_name = agent_command_name(agent_argv)
+    container_id = f"{agent_name}-{int(time.time())}"
+    runtime_home_dir = "/tmp/agent-home"
     dataset_root = resolve_dataset_root(getattr(args, "dataset_root", None))
     plan_mode_enabled = not getattr(args, "no_plan_mode", False)
     custom_instructions = DATASET_PLAN_INSTRUCTIONS if plan_mode_enabled else None
@@ -521,6 +724,8 @@ def launch(args: argparse.Namespace) -> int:
             "workdir": str(workdir),
             "runtime_dir": str(runtime_dir),
             "container_id": container_id,
+            "agent_command": agent_name,
+            "agent_argv": agent_argv,
             "web_port": args.web_port,
             "decision_timeout": args.decision_timeout,
             "profile": "default.yaml",
@@ -557,20 +762,28 @@ def launch(args: argparse.Namespace) -> int:
     broker_tcp_port = reserve_tcp_port()
     mitm_tcp_port = reserve_tcp_port()
     runsc_bin = Path(args.runsc_bin).resolve() if args.runsc_bin else find_runsc_binary()
-    mitmdump_bin = find_mitmdump_binary()
+    mitmdump_command = find_mitmdump_command()
     broker_proc = None
     mitm_proc = None
     runsc_proc = None
     console_server = None
     try:
+        proxy_mode = getattr(args, "proxy_mode", "all")
         mitm_proc = spawn_mitmdump(
-            mitmdump_bin,
+            mitmdump_command,
             mitm_tcp_port,
             mitm_log_path,
             llm_log_path,
             dataset_session,
         )
-        wait_for_tcp_ready("127.0.0.1", mitm_tcp_port, timeout=10)
+        wait_for_tcp_ready(
+            "127.0.0.1",
+            mitm_tcp_port,
+            timeout=10,
+            child=mitm_proc,
+            log_path=mitm_log_path,
+            service_name="mitmdump",
+        )
         broker_proc = spawn_broker(
             broker_socket_path,
             args.web_port,
@@ -582,59 +795,51 @@ def launch(args: argparse.Namespace) -> int:
             None,
             None,
             llm_log_path,
-            f"http://127.0.0.1:{mitm_tcp_port}",
         )
         wait_for_http_ready(args.web_port, timeout=10)
         resolv_path, hosts_path, nsswitch_path = write_runtime_network_files(runtime_dir)
-        bootstrap_dir = write_bootstrap_files(runtime_dir)
-        # The sandbox uses host networking (via runsc `--network=host` plus an OCI spec
-        # without a network namespace), so loopback reaches the host-side broker.
-        proxy_base_url = f"http://127.0.0.1:{args.web_port}/openai/v1"
         upstream_proxy_url = f"http://127.0.0.1:{mitm_tcp_port}"
+        sandbox_upstream_proxy_url = upstream_proxy_url if proxy_mode == "all" else None
+        mitm_ca_cert = None
+        trusted_ca_cert_path = None
+        if proxy_mode == "all":
+            # Always try to mount the mitmproxy CA cert so HTTPS traffic can be
+            # TLS-intercepted. Without this, mitmproxy sees an encrypted tunnel
+            # but cannot read the request body, so no LLM logs are produced.
+            with suppress(FileNotFoundError):
+                mitm_ca_cert = find_mitmproxy_ca_cert()
+                trusted_ca_cert_path = "/tmp/mitmproxy/mitmproxy-ca-cert.pem"
 
-        # Codex CLI defaults to api.openai.com and may use websockets for the responses API.
-        # To guarantee broker/mitm capture (and avoid sandbox DNS issues), force:
-        # - base URL to the local broker reverse proxy
-        # - websockets off (use HTTP/SSE instead)
-        if agent_argv and len(agent_argv) >= 2 and agent_argv[1].endswith("/codex.js"):
-            # Codex's built-in `openai` provider currently prefers WebSocket transport,
-            # and `supports_websockets=false` may not disable it for that provider.
-            # To guarantee HTTP/SSE (so the mitmproxy addon can log full bodies),
-            # force a custom provider with websockets disabled.
-            #
-            # See: https://github.com/openai/codex/issues/13103
-            has_model_provider = any(token.startswith("model_provider=") for token in agent_argv)
-            has_custom_provider_base = any(
-                token.startswith("model_providers.openai_custom.base_url=")
-                or token.startswith('model_providers.openai_custom.base_url="')
-                for token in agent_argv
+        agent_argv, agent_mounts = resolve_agent_argv_and_mounts(agent_argv, runtime_home_dir)
+        if mitm_ca_cert is not None and trusted_ca_cert_path:
+            # Copy only the CA cert into a staging directory and bind-mount the
+            # directory (not the file) into the container.  gVisor requires the
+            # bind-mount destination to pre-exist; a file target under /tmp (which
+            # is a tmpfs) may not exist yet, causing a silent mount failure.
+            # Mounting the parent directory avoids that problem.
+            certs_staging = runtime_dir / "certs"
+            certs_staging.mkdir(exist_ok=True)
+            shutil.copy2(str(mitm_ca_cert), str(certs_staging / mitm_ca_cert.name))
+            agent_mounts.append(
+                {
+                    "destination": str(Path(trusted_ca_cert_path).parent),
+                    "type": "bind",
+                    "source": str(certs_staging),
+                    "options": ["rbind", "ro"],
+                }
             )
-            has_custom_provider_ws = any(
-                token.startswith("model_providers.openai_custom.supports_websockets=") for token in agent_argv
-            )
-            inject: list[str] = []
-            if not has_model_provider:
-                inject.extend(["-c", 'model_provider="openai_custom"'])
-            if not has_custom_provider_base:
-                inject.extend(["-c", f'model_providers.openai_custom.base_url="{proxy_base_url}"'])
-                inject.extend(["-c", 'model_providers.openai_custom.env_key="OPENAI_API_KEY"'])
-                inject.extend(["-c", 'model_providers.openai_custom.name="OpenAI (broker)"'])
-                inject.extend(["-c", "model_providers.openai_custom.requires_openai_auth=true"])
-            if not has_custom_provider_ws:
-                inject.extend(["-c", "model_providers.openai_custom.supports_websockets=false"])
-            if inject:
-                agent_argv = [agent_argv[0], agent_argv[1], *inject, *agent_argv[2:]]
         write_bundle_config(
             bundle_dir,
             workdir=workdir,
-            runtime_home_dir="/home",
+            runtime_home_dir=runtime_home_dir,
             container_id=container_id,
             resolv_conf_path=str(resolv_path),
             hosts_path=str(hosts_path),
             nsswitch_conf_path=str(nsswitch_path),
-            proxy_base_url=proxy_base_url,
-            upstream_proxy_url=None,
+            upstream_proxy_url=sandbox_upstream_proxy_url,
             agent_argv=agent_argv,
+            extra_mounts=agent_mounts,
+            trusted_ca_cert_path=trusted_ca_cert_path,
             hook_timeout_ms=int(args.decision_timeout * 1000),
             hook_warmup_ms=20000,
             hook_container_id=container_id,
@@ -651,22 +856,6 @@ def launch(args: argparse.Namespace) -> int:
             and not entry.startswith("GVISOR_HOOK_EVENT_LOG=")
             and not entry.startswith("GVISOR_HOOK_DECISION_DIR=")
         ]
-        config["mounts"].append(
-            {
-                "destination": "/tmp/bootstrap",
-                "type": "bind",
-                "source": str(bootstrap_dir),
-                "options": ["rbind", "ro"],
-            }
-        )
-        config["mounts"].append(
-            {
-                "destination": "/tmp/host-run",
-                "type": "bind",
-                "source": str(runtime_dir),
-                "options": ["rbind", "rw"],
-            }
-        )
         config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
         console_server = ConsoleSocketServer(console_socket_path)
 
@@ -681,8 +870,14 @@ def launch(args: argparse.Namespace) -> int:
         )
 
         print(f"Approval UI: http://127.0.0.1:{args.web_port}", file=sys.stderr)
-        print(f"OpenAI base (broker): {proxy_base_url}", file=sys.stderr)
-        print(f"HTTP(S) proxy (mitm): {upstream_proxy_url}", file=sys.stderr)
+        if proxy_mode == "all":
+            print(f"HTTP(S) proxy (mitm): {upstream_proxy_url}", file=sys.stderr)
+            if trusted_ca_cert_path:
+                print(f"Trusted mitm CA: {trusted_ca_cert_path}", file=sys.stderr)
+            else:
+                print("Warning: mitmproxy CA cert not found; HTTPS interception may fail", file=sys.stderr)
+        else:
+            print("HTTP(S) proxy (mitm): disabled", file=sys.stderr)
         print(f"Dataset session: {dataset_session.session_root}", file=sys.stderr)
         print(f"runsc logs: {runsc_logs_dir}", file=sys.stderr)
         runsc_cmd: list[str] = [

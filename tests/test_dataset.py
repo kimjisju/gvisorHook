@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gvisor_hook.bundle import DATASET_PLAN_INSTRUCTIONS, write_bundle_config
+from gvisor_hook.bundle import write_bundle_config
 from gvisor_hook.dataset import create_dataset_session, record_terminal_chunk
 
 
@@ -39,7 +39,7 @@ class DatasetCaptureTests(unittest.TestCase):
             self.assertEqual(stdin_event["offset"], 0)
             self.assertEqual(stdout_event["offset"], 0)
 
-    def test_write_bundle_config_adds_profile_and_plan_instructions(self) -> None:
+    def test_write_bundle_config_uses_agent_argv_and_proxy_env(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             bundle_dir = Path(tempdir) / "bundle"
             config_path = write_bundle_config(
@@ -50,18 +50,16 @@ class DatasetCaptureTests(unittest.TestCase):
                 resolv_conf_path="/tmp/resolv.conf",
                 hosts_path="/tmp/hosts",
                 nsswitch_conf_path="/tmp/nsswitch.conf",
-                proxy_base_url="http://127.0.0.1:18080/openai/v1",
-                profile="default.yaml",
-                custom_instructions=DATASET_PLAN_INSTRUCTIONS,
+                upstream_proxy_url="http://127.0.0.1:12345",
+                agent_argv=["/tmp/agent/bin/tool", "run"],
+                trusted_ca_cert_path="/tmp/mitmproxy/mitmproxy-ca-cert.pem",
             )
 
             config = json.loads(config_path.read_text(encoding="utf-8"))
-            args = config["process"]["args"]
-            self.assertEqual(args[:2], ["/usr/bin/python3", "/tmp/open-interpreter/bin/interpreter"])
-            self.assertIn("--profile", args)
-            self.assertIn("default.yaml", args)
-            self.assertIn("--custom_instructions", args)
-            self.assertIn(DATASET_PLAN_INSTRUCTIONS, args)
+            self.assertEqual(config["process"]["args"], ["/tmp/agent/bin/tool", "run"])
+            env = config["process"]["env"]
+            self.assertIn("HTTP_PROXY=http://127.0.0.1:12345", env)
+            self.assertIn("NODE_EXTRA_CA_CERTS=/tmp/mitmproxy/mitmproxy-ca-cert.pem", env)
 
 
 if __name__ == "__main__":

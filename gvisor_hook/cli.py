@@ -50,7 +50,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     launch_parser.add_argument("--dataset-root", default=None)
     launch_parser.add_argument("--no-plan-mode", action="store_true")
-
+    launch_parser.add_argument(
+        "--proxy-mode",
+        choices=("all", "off"),
+        default="all",
+        help=(
+            "LLM traffic proxying mode. 'all' sets HTTP(S)/ALL_PROXY inside the sandbox so all "
+            "traffic is captured by mitmproxy, and 'off' disables mitm routing."
+        ),
+    )
     serve_parser = subparsers.add_parser("serve", help=argparse.SUPPRESS)
     serve_parser.add_argument("--socket-path", required=True)
     serve_parser.add_argument("--web-port", type=int, required=True)
@@ -62,7 +70,6 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--event-log-path", default=None)
     serve_parser.add_argument("--decision-dir", default=None)
     serve_parser.add_argument("--llm-log-path", default=None)
-    serve_parser.add_argument("--llm-proxy-url", default=None)
     return parser
 
 

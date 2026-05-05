@@ -121,7 +121,7 @@ class ApprovalBrokerTests(unittest.IsolatedAsyncioTestCase):
                 "request_headers_sha256": "hdr123",
                 "request_content_type": "application/json",
                 "request_headers_path": "/tmp/session/llm/llm-1/request_headers.raw",
-                "request_body_path": "/tmp/session/llm/llm-1/request_body.bin",
+                "request_body_path": "/tmp/session/llm/llm-1/request_body.json",
                 "response_status": 200,
                 "response_summary": "response_bytes=456; content_type=text/event-stream",
                 "response_body": "data: {\"choices\":[]}",
@@ -130,7 +130,7 @@ class ApprovalBrokerTests(unittest.IsolatedAsyncioTestCase):
                 "response_headers_sha256": "hdr456",
                 "response_content_type": "text/event-stream",
                 "response_headers_path": "/tmp/session/llm/llm-1/response_headers.raw",
-                "response_body_path": "/tmp/session/llm/llm-1/response_body.bin",
+                "response_body_path": "/tmp/session/llm/llm-1/response_body.json",
                 "meta_path": "/tmp/session/llm/llm-1/meta.json",
                 "artifact_dir": "/tmp/session/llm/llm-1",
                 "is_stream": True,
@@ -145,5 +145,5 @@ class ApprovalBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(exchange["id"], "llm-1")
         self.assertEqual(exchange["session_id"], "session-1")
         self.assertEqual(exchange["response_status"], 200)
-        self.assertEqual(exchange["request_body_path"], "/tmp/session/llm/llm-1/request_body.bin")
+        self.assertEqual(exchange["request_body_path"], "/tmp/session/llm/llm-1/request_body.json")
         self.assertTrue(exchange["is_stream"])

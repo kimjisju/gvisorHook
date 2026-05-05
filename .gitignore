@@ -7,3 +7,9 @@ artifacts/
 .gvisor-hook/
 open-interpreter/
 third_party/gvisor/.git.backup-local/
+
+venv
+.venv
+
+datasets/
+gooddata/

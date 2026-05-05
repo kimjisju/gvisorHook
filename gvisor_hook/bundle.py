@@ -5,19 +5,21 @@ import os
 from pathlib import Path
 
 
-DEFAULT_ENV_ALLOWLIST_PREFIXES = (
-    "OPENAI_",
-    "ANTHROPIC_",
-    "GEMINI_",
-    "GOOGLE_",
-    "AZURE_",
-    "AWS_",
-    "MISTRAL_",
-    "TOGETHER_",
-    "DEEPSEEK_",
-    "XAI_",
-    "OLLAMA_",
-    "LITELLM_",
+DEFAULT_ENV_ALLOWLIST_SUFFIXES = (
+    "_API_KEY",
+    "_API_BASE",
+    "_ACCESS_TOKEN",
+    "_AUTH_TOKEN",
+    "_BASE_URL",
+    "_BEARER_TOKEN",
+    "_CREDENTIALS",
+    "_CREDENTIALS_FILE",
+    "_ENDPOINT",
+)
+
+LOCAL_PROXY_BYPASS_HOSTS = (
+    "127.0.0.1",
+    "localhost",
 )
 
 
@@ -30,7 +32,6 @@ DATASET_PLAN_INSTRUCTIONS = (
 
 def build_process_env(
     home_dir: str,
-    proxy_base_url: str,
     *,
     upstream_proxy_url: str | None = None,
     hook_addr: str | None = None,
@@ -40,16 +41,17 @@ def build_process_env(
     hook_timeout_ms: int | None = None,
     hook_warmup_ms: int | None = None,
     hook_container_id: str | None = None,
+    proxy_bypass_hosts: list[str] | tuple[str, ...] | None = None,
+    trusted_ca_cert_path: str | None = None,
 ) -> list[str]:
+    bypass_hosts = list(LOCAL_PROXY_BYPASS_HOSTS if proxy_bypass_hosts is None else proxy_bypass_hosts)
+    extra_no_proxy = os.environ.get("GVISOR_HOOK_EXTRA_NO_PROXY", "")
+    bypass_hosts.extend(host.strip() for host in extra_no_proxy.split(",") if host.strip())
     env = {
         "HOME": home_dir,
         "XDG_CACHE_HOME": f"{home_dir}/.cache",
         "XDG_CONFIG_HOME": f"{home_dir}/.config",
         "PYTHONUNBUFFERED": "1",
-        #"PYTHONPATH": "/tmp/bootstrap:/tmp/open-interpreter/site-packages",
-        "PYTHONPATH": "/tmp/bootstrap",
-        "OPENAI_BASE_URL": proxy_base_url,
-        "OPENAI_API_BASE": proxy_base_url,
         "LITELLM_LOCAL_MODEL_COST_MAP": "true",
         "TERM": os.environ.get("TERM", "xterm-256color"),
         "COLORTERM": os.environ.get("COLORTERM", "truecolor"),
@@ -58,16 +60,25 @@ def build_process_env(
         "COLUMNS": os.environ.get("COLUMNS", "120"),
         "LINES": os.environ.get("LINES", "40"),
         #"PATH": "/tmp/open-interpreter/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "PATH": "/tmp/agent/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "LANG": os.environ.get("LANG", "C.UTF-8"),
     }
     if upstream_proxy_url:
-        # Ensure Codex (and other clients) reach the network through the mitmproxy tap,
-        # including websocket connections, without relying on container DNS.
-        env.setdefault("HTTP_PROXY", upstream_proxy_url)
-        env.setdefault("HTTPS_PROXY", upstream_proxy_url)
-        env.setdefault("ALL_PROXY", upstream_proxy_url)
-        env.setdefault("NO_PROXY", "127.0.0.1,localhost")
+        no_proxy_val = ",".join(dict.fromkeys(bypass_hosts))
+        # Set both uppercase and lowercase variants; different clients (curl, wget,
+        # Python requests, Node.js fetch, etc.) read different casing.
+        for _k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+            env.setdefault(_k, upstream_proxy_url)
+            env.setdefault(_k.lower(), upstream_proxy_url)
+        env.setdefault("NO_PROXY", no_proxy_val)
+        env.setdefault("no_proxy", no_proxy_val)
+    if trusted_ca_cert_path:
+        env.setdefault("NODE_EXTRA_CA_CERTS", trusted_ca_cert_path)
+        env.setdefault("REQUESTS_CA_BUNDLE", trusted_ca_cert_path)
+        env.setdefault("SSL_CERT_FILE", trusted_ca_cert_path)
+        env.setdefault("CURL_CA_BUNDLE", trusted_ca_cert_path)
+        env.setdefault("GIT_SSL_CAINFO", trusted_ca_cert_path)
+        env.setdefault("GRPC_DEFAULT_SSL_ROOTS_FILE_PATH", trusted_ca_cert_path)
     if hook_addr:
         env["GVISOR_HOOK_ADDR"] = hook_addr
     if hook_socket_path:
@@ -83,7 +94,7 @@ def build_process_env(
     if hook_container_id:
         env["GVISOR_HOOK_CONTAINER_ID"] = hook_container_id
     for key, value in os.environ.items():
-        if key.endswith("_API_KEY") or key.startswith(DEFAULT_ENV_ALLOWLIST_PREFIXES):
+        if key.endswith(DEFAULT_ENV_ALLOWLIST_SUFFIXES):
             env[key] = value
     return [f"{key}={value}" for key, value in sorted(env.items()) if value]
 
@@ -97,9 +108,9 @@ def write_bundle_config(
     resolv_conf_path: str,
     hosts_path: str,
     nsswitch_conf_path: str,
-    proxy_base_url: str,
     upstream_proxy_url: str | None = None,
     agent_argv: list[str] | None = None,
+    extra_mounts: list[dict[str, object]] | None = None,
     hook_addr: str | None = None,
     hook_socket_path: str | None = None,
     hook_event_log_path: str | None = None,
@@ -107,6 +118,8 @@ def write_bundle_config(
     hook_timeout_ms: int | None = None,
     hook_warmup_ms: int | None = None,
     hook_container_id: str | None = None,
+    proxy_bypass_hosts: list[str] | tuple[str, ...] | None = None,
+    trusted_ca_cert_path: str | None = None,
     profile: str | None = None,
     custom_instructions: str | None = None,
 ) -> Path:
@@ -115,11 +128,6 @@ def write_bundle_config(
     workdir = workdir.resolve()
 
     process_args = agent_argv or ["/usr/local/bin/codex"]
-    # if profile:
-    #     process_args.extend(["--profile", profile])
-    # if custom_instructions:
-    #     process_args.extend(["--custom_instructions", custom_instructions])
-    # process_args.extend(["--api_base", proxy_base_url])
 
     config = {
         "ociVersion": "1.0.2",
@@ -130,7 +138,6 @@ def write_bundle_config(
             "cwd": "/tmp/workspace",
             "env": build_process_env(
                 runtime_home_dir,
-                proxy_base_url,
                 upstream_proxy_url=upstream_proxy_url,
                 hook_addr=hook_addr,
                 hook_socket_path=hook_socket_path,
@@ -139,6 +146,8 @@ def write_bundle_config(
                 hook_timeout_ms=hook_timeout_ms,
                 hook_warmup_ms=hook_warmup_ms,
                 hook_container_id=hook_container_id,
+                proxy_bypass_hosts=proxy_bypass_hosts,
+                trusted_ca_cert_path=trusted_ca_cert_path,
             ),
             "capabilities": {
                 "bounding": [],
@@ -163,6 +172,7 @@ def write_bundle_config(
                 {"destination": "/usr/bin/lsb_release", "type": "bind", "source": "/usr/bin/lsb_release", "options": ["bind", "ro"]},
 	            #{"destination": "/tmp/open-interpreter/bin/interpreter", "type": "bind", "source": "/home/kimjisu/.local/bin/interpreter", "options": ["bind", "ro"]},
             #{"destination": "/tmp/open-interpreter/site-packages", "type": "bind", "source": "/home/kimjisu/.local/lib/python3.10/site-packages", "options": ["rbind", "ro"]},
+                *(extra_mounts or []),
         ],
         "linux": {
             "namespaces": [
