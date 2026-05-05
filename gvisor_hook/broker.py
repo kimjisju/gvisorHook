@@ -14,6 +14,7 @@ from typing import Any
 from aiohttp import web
 
 from .models import BrokerEnvelope, LLMExchange, SyscallEvent
+from .reason_pipeline import ReasonPipelineConfig, run_reason_pipeline_event
 
 LOG = logging.getLogger(__name__)
 
@@ -188,6 +189,7 @@ class ApprovalBroker:
         event_log_path: Path | None = None,
         decision_dir: Path | None = None,
         llm_log_path: Path | None = None,
+        reason_pipeline_config: ReasonPipelineConfig | None = None,
     ) -> None:
         self.socket_path = socket_path
         self.decision_timeout = decision_timeout
@@ -196,6 +198,7 @@ class ApprovalBroker:
         self.event_log_path = event_log_path
         self.decision_dir = decision_dir
         self.llm_log_path = llm_log_path
+        self.reason_pipeline_config = reason_pipeline_config
         self._events: OrderedDict[str, SyscallEvent] = OrderedDict()
         self._llm_exchanges: OrderedDict[str, LLMExchange] = OrderedDict()
         self._pending: dict[str, asyncio.Future[str]] = {}
@@ -271,6 +274,31 @@ class ApprovalBroker:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
+    def _latest_llm_exchange(self) -> LLMExchange | None:
+        for exchange in reversed(self._llm_exchanges.values()):
+            if exchange.status == "completed":
+                return exchange
+        return None
+
+    def _start_reason_pipeline(self, event: SyscallEvent) -> None:
+        if self.reason_pipeline_config is None:
+            return
+        self._start_task(self._run_reason_pipeline(event))
+
+    async def _run_reason_pipeline(self, event: SyscallEvent) -> None:
+        assert self.reason_pipeline_config is not None
+        exchange = self._latest_llm_exchange()
+        try:
+            await run_reason_pipeline_event(
+                self.reason_pipeline_config,
+                exchange=exchange,
+                syscall_event=event,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOG.exception("Reason pipeline failed for event id=%s: %s", event.id, exc)
+
     async def _handle_ipc_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             while True:
@@ -300,6 +328,7 @@ class ApprovalBroker:
                     self._events[event.id] = event
                     self._pending[event.id] = future
                 await self._broadcast(BrokerEnvelope("event-upsert", {"event": event.to_dict()}).to_dict())
+                self._start_reason_pipeline(event)
                 decision = "deny"
                 errno = "EPERM"
                 try:
@@ -392,6 +421,7 @@ class ApprovalBroker:
             event.path,
         )
         await self._broadcast(BrokerEnvelope("event-upsert", {"event": event.to_dict()}).to_dict())
+        self._start_reason_pipeline(event)
         self._start_task(self._await_file_decision(event.id, event.syscall, future))
 
     async def _upsert_llm_exchange(self, exchange: LLMExchange) -> None:
@@ -518,6 +548,7 @@ async def create_app(
     event_log_path: Path | None = None,
     decision_dir: Path | None = None,
     llm_log_path: Path | None = None,
+    reason_pipeline_config: ReasonPipelineConfig | None = None,
 ) -> web.Application:
     broker = ApprovalBroker(
         socket_path=socket_path,
@@ -527,6 +558,7 @@ async def create_app(
         event_log_path=event_log_path,
         decision_dir=decision_dir,
         llm_log_path=llm_log_path,
+        reason_pipeline_config=reason_pipeline_config,
     )
     await broker.start()
     app = web.Application()
@@ -550,6 +582,7 @@ async def serve(args: argparse.Namespace) -> None:
         event_log_path=Path(args.event_log_path) if args.event_log_path else None,
         decision_dir=Path(args.decision_dir) if args.decision_dir else None,
         llm_log_path=Path(args.llm_log_path) if args.llm_log_path else None,
+        reason_pipeline_config=build_reason_pipeline_config(args),
     )
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
@@ -584,3 +617,23 @@ async def serve(args: argparse.Namespace) -> None:
             loop.add_signal_handler(signame, stop_event.set)
     await stop_event.wait()
     await runner.cleanup()
+
+
+def build_reason_pipeline_config(args: argparse.Namespace) -> ReasonPipelineConfig | None:
+    if not args.reason_pipeline_dir:
+        return None
+    pipeline_dir = Path(args.reason_pipeline_dir)
+    event_dir = Path(args.reason_pipeline_event_dir) if args.reason_pipeline_event_dir else pipeline_dir / "events"
+    log_path = (
+        Path(args.reason_pipeline_log_path)
+        if args.reason_pipeline_log_path
+        else pipeline_dir / "reason-pipeline.ndjson"
+    )
+    db_path = Path(args.reason_pipeline_db_path) if args.reason_pipeline_db_path else None
+    return ReasonPipelineConfig(
+        pipeline_dir=pipeline_dir,
+        agent_name=args.reason_pipeline_agent_name,
+        event_dir=event_dir,
+        log_path=log_path,
+        db_path=db_path,
+    )

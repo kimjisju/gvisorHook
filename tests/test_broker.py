@@ -5,8 +5,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from gvisor_hook.broker import ApprovalBroker
+from gvisor_hook.reason_pipeline import ReasonPipelineConfig
 
 
 class ApprovalBrokerTests(unittest.IsolatedAsyncioTestCase):
@@ -102,6 +104,36 @@ class ApprovalBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(decision_path.exists())
         decision = json.loads(decision_path.read_text(encoding="utf-8"))
         self.assertEqual(decision["decision"], "allow")
+
+    async def test_reason_pipeline_runs_for_file_backend_syscall(self) -> None:
+        pipeline_dir = Path(self.tempdir.name) / "third_party" / "reason_pipeline"
+        pipeline_dir.mkdir(parents=True)
+        self.broker.reason_pipeline_config = ReasonPipelineConfig(
+            pipeline_dir=pipeline_dir,
+            agent_name="codex",
+            event_dir=Path(self.tempdir.name) / "reason-events",
+            log_path=Path(self.tempdir.name) / "reason.ndjson",
+            db_path=Path(self.tempdir.name) / "reason.db",
+        )
+        payload = {
+            "id": "evt-reason-1",
+            "container_id": "demo",
+            "pid": 10,
+            "tid": 11,
+            "syscall": "openat",
+            "summary": "open write-intent",
+            "path": "/tmp/workspace/demo.txt",
+            "argv": None,
+            "started_at": "2026-04-04T00:00:00Z",
+            "status": "pending",
+        }
+        with mock.patch("gvisor_hook.broker.run_reason_pipeline_event", new_callable=mock.AsyncMock) as run_mock:
+            self.event_log_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+            await asyncio.sleep(0.3)
+
+        run_mock.assert_awaited_once()
+        _, kwargs = run_mock.await_args
+        self.assertEqual(kwargs["syscall_event"].id, "evt-reason-1")
 
     async def test_llm_log_round_trip(self) -> None:
         payload = {

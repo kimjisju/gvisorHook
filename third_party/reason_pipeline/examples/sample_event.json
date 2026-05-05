@@ -1,0 +1,51 @@
+{
+  "agent_name": "sample-openai-agent",
+  "request": {
+    "method": "POST",
+    "path": "/v1/responses",
+    "body": {
+      "messages": [
+        {
+          "role": "system",
+          "content": "You are a coding assistant."
+        },
+        {
+          "role": "user",
+          "content": "Create a backup of ~/.bashrc and append alias ll='ls -alF'."
+        }
+      ]
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "output": [
+        {
+          "type": "reasoning",
+          "summary": "The user explicitly asked for a shell-side file mutation, so I should preserve the target path and describe the write operation before execution."
+        },
+        {
+          "type": "message",
+          "role": "assistant",
+          "content": [
+            {
+              "type": "output_text",
+              "text": "I will create ~/.bashrc.bak first and then append the alias to ~/.bashrc."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "syscall": {
+    "name": "openat",
+    "args": {
+      "pathname": "/home/demo/.bashrc",
+      "flags": [
+        "O_WRONLY",
+        "O_CREAT",
+        "O_APPEND"
+      ]
+    }
+  }
+}

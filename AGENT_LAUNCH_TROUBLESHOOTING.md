@@ -378,6 +378,41 @@ _ENDPOINT
 
 ## Debugging Checklist
 
+## Reason Pipeline
+
+`kimjisju/reason_pipeline`은 `third_party/reason_pipeline`에 둔다.
+기본 실행에서는 이 경로가 있으면 syscall event가 발생할 때마다 reason pipeline을 백그라운드로 실행한다.
+
+입력 event 파일은 dataset session 아래에 저장한다.
+
+```text
+<session>/reason-pipeline-events/<syscall-event-id>.json
+```
+
+실행 결과 로그는 다음 파일에 저장한다.
+
+```text
+<session>/reason-pipeline.ndjson
+```
+
+pipeline DB는 session별로 분리한다.
+
+```text
+<session>/reason-pipeline.db
+```
+
+비활성화:
+
+```bash
+python3 -m gvisor_hook launch ... --no-reason-pipeline
+```
+
+경로를 직접 지정:
+
+```bash
+python3 -m gvisor_hook launch ... --reason-pipeline-dir /path/to/reason_pipeline
+```
+
 ### 1. 실제 command 확인
 
 ```bash

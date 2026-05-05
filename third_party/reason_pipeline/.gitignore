@@ -1,0 +1,15 @@
+venv
+.venv
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+data/*.db
+generated_parsers/*.py
+!generated_parsers/__init__.py
+generated_parsers_tmp_verify/
+examples/request_body.json
+examples/response_body.json
+examples/syscall.json

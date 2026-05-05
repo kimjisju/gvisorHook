@@ -51,6 +51,18 @@ def build_parser() -> argparse.ArgumentParser:
     launch_parser.add_argument("--dataset-root", default=None)
     launch_parser.add_argument("--no-plan-mode", action="store_true")
     launch_parser.add_argument(
+        "--reason-pipeline-dir",
+        default=None,
+        help=(
+            "Path to kimjisju/reason_pipeline. If omitted, third_party/reason_pipeline is used when present."
+        ),
+    )
+    launch_parser.add_argument(
+        "--no-reason-pipeline",
+        action="store_true",
+        help="Disable running reason_pipeline for each syscall event.",
+    )
+    launch_parser.add_argument(
         "--proxy-mode",
         choices=("all", "off"),
         default="all",
@@ -70,6 +82,11 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--event-log-path", default=None)
     serve_parser.add_argument("--decision-dir", default=None)
     serve_parser.add_argument("--llm-log-path", default=None)
+    serve_parser.add_argument("--reason-pipeline-dir", default=None)
+    serve_parser.add_argument("--reason-pipeline-agent-name", default="agent")
+    serve_parser.add_argument("--reason-pipeline-event-dir", default=None)
+    serve_parser.add_argument("--reason-pipeline-log-path", default=None)
+    serve_parser.add_argument("--reason-pipeline-db-path", default=None)
     return parser
 
 

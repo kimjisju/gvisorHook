@@ -1,0 +1,86 @@
+syscall_name,affects_host_os,category,rationale
+read,0,read_only,Reads data without mutating external host state.
+pread64,0,read_only,Reads file content without changing host-visible state.
+recvfrom,0,read_only,Receives data from an existing channel without creating a new host-side effect.
+recvmsg,0,read_only,Receives message data without mutating external host state.
+stat,0,metadata_read,Reads file metadata only.
+fstat,0,metadata_read,Reads file descriptor metadata only.
+lstat,0,metadata_read,Reads symlink metadata only.
+newfstatat,0,metadata_read,Reads path metadata only.
+access,0,metadata_read,Checks permissions without mutating host state.
+getpid,0,process_introspection,Returns process metadata only.
+getppid,0,process_introspection,Returns parent process metadata only.
+uname,0,system_introspection,Reads kernel identity only.
+clock_gettime,0,time_read,Reads clock state only.
+gettimeofday,0,time_read,Reads clock state only.
+nanosleep,0,scheduling,Blocks the process without mutating host resources.
+poll,0,wait,Waits on descriptors without mutating host resources.
+select,0,wait,Waits on descriptors without mutating host resources.
+epoll_wait,0,wait,Waits for events without mutating host-visible state.
+close,0,descriptor_local,Releases a local descriptor reference only.
+lseek,0,descriptor_local,Changes the file offset inside the process only.
+dup,0,descriptor_local,Duplicates a local descriptor reference only.
+dup2,0,descriptor_local,Duplicates a local descriptor reference only.
+dup3,0,descriptor_local,Duplicates a local descriptor reference only.
+mmap,0,memory_local,Maps memory in the process only.
+munmap,0,memory_local,Unmaps process memory only.
+mprotect,0,memory_local,Adjusts process memory protection only.
+brk,0,memory_local,Adjusts process heap only.
+futex,0,thread_local,Synchronizes threads without directly mutating host-visible state.
+write,1,io_side_effect,May write to files, pipes, sockets, or devices and can change host-observable state.
+pwrite64,1,io_side_effect,Performs positioned writes that can change file contents.
+open,1,file_mutation,May create or open writable resources depending on flags.
+openat,1,file_mutation,May create or open writable resources depending on flags.
+creat,1,file_mutation,Creates or truncates files.
+truncate,1,file_mutation,Changes file size and contents.
+ftruncate,1,file_mutation,Changes file size and contents.
+rename,1,file_mutation,Renames filesystem objects and changes persistent host state.
+renameat,1,file_mutation,Renames filesystem objects and changes persistent host state.
+unlink,1,file_mutation,Removes directory entries.
+unlinkat,1,file_mutation,Removes directory entries.
+mkdir,1,file_mutation,Creates directories.
+mkdirat,1,file_mutation,Creates directories.
+rmdir,1,file_mutation,Removes directories.
+link,1,file_mutation,Creates hard links in the filesystem.
+linkat,1,file_mutation,Creates hard links in the filesystem.
+symlink,1,file_mutation,Creates symbolic links in the filesystem.
+symlinkat,1,file_mutation,Creates symbolic links in the filesystem.
+chmod,1,permission_change,Changes filesystem permission bits.
+fchmod,1,permission_change,Changes filesystem permission bits.
+fchmodat,1,permission_change,Changes filesystem permission bits.
+chown,1,permission_change,Changes file ownership metadata.
+fchown,1,permission_change,Changes file ownership metadata.
+fchownat,1,permission_change,Changes file ownership metadata.
+utimensat,1,metadata_mutation,Changes file timestamps.
+fsync,1,persistence,Forces dirty data to stable storage.
+fdatasync,1,persistence,Forces dirty file data to stable storage.
+sync,1,persistence,Flushes buffered host state to storage.
+syncfs,1,persistence,Flushes filesystem state to storage.
+socket,1,network,Creates a socket in the host networking stack.
+connect,1,network,Creates outbound network state and remote side effects.
+bind,1,network,Reserves a local network endpoint.
+listen,1,network,Transitions a socket into a listening state.
+accept,1,network,Establishes a new connection and changes network state.
+accept4,1,network,Establishes a new connection and changes network state.
+sendto,1,network,Sends bytes that are externally observable.
+sendmsg,1,network,Sends bytes that are externally observable.
+setsockopt,1,network,Changes socket behavior in the host networking stack.
+shutdown,1,network,Changes socket connection state.
+clone,1,process_control,Creates a new thread or process.
+fork,1,process_control,Creates a new process.
+vfork,1,process_control,Creates a new process with shared execution constraints.
+execve,1,process_control,Replaces the process image and changes executed program state.
+execveat,1,process_control,Replaces the process image and changes executed program state.
+kill,1,process_control,Sends signals that change another process state.
+tgkill,1,process_control,Sends thread-directed signals that change another process state.
+mount,1,namespace,Changes mount namespace state.
+umount2,1,namespace,Removes mounted filesystem state.
+pivot_root,1,namespace,Changes the process root filesystem.
+setuid,1,credential_change,Changes process credentials.
+setgid,1,credential_change,Changes process credentials.
+setresuid,1,credential_change,Changes process credentials.
+setresgid,1,credential_change,Changes process credentials.
+setgroups,1,credential_change,Changes supplemental group credentials.
+ioctl,1,device_control,May send mutating commands to devices or terminals.
+prctl,1,process_control,Can change process execution and security behavior.
+exec_command,1,agent_tool_execution,Executes an agent tool command that can trigger host-visible process/file/network effects.

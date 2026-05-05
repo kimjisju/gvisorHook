@@ -31,6 +31,7 @@ from .dataset import (
     record_terminal_chunk,
     utc_now,
 )
+from .reason_pipeline import default_reason_pipeline_dir
 
 def _apply_winsize(master_fd: int, *, cols: int, rows: int) -> None:
     # TIOCSWINSZ expects (rows, cols, xpixel, ypixel) as unsigned short.
@@ -513,6 +514,11 @@ def spawn_broker(
     event_log_path: Path | None,
     decision_dir: Path | None,
     llm_log_path: Path | None,
+    reason_pipeline_dir: Path | None = None,
+    reason_pipeline_agent_name: str | None = None,
+    reason_pipeline_event_dir: Path | None = None,
+    reason_pipeline_log_path: Path | None = None,
+    reason_pipeline_db_path: Path | None = None,
 ) -> subprocess.Popen[bytes]:
     command = [
         sys.executable,
@@ -545,6 +551,21 @@ def spawn_broker(
         )
     if llm_log_path is not None:
         command.extend(["--llm-log-path", str(llm_log_path)])
+    if reason_pipeline_dir is not None:
+        command.extend(
+            [
+                "--reason-pipeline-dir",
+                str(reason_pipeline_dir),
+                "--reason-pipeline-agent-name",
+                reason_pipeline_agent_name or "agent",
+                "--reason-pipeline-event-dir",
+                str(reason_pipeline_event_dir),
+                "--reason-pipeline-log-path",
+                str(reason_pipeline_log_path),
+            ]
+        )
+        if reason_pipeline_db_path is not None:
+            command.extend(["--reason-pipeline-db-path", str(reason_pipeline_db_path)])
     log_path.parent.mkdir(parents=True, exist_ok=True)
     broker_log = log_path.open("a", encoding="utf-8")
     return subprocess.Popen(
@@ -758,6 +779,16 @@ def launch(args: argparse.Namespace) -> int:
     broker_log_path = dataset_session.broker_log_path
     llm_log_path = dataset_session.llm_ui_log_path
     mitm_log_path = dataset_session.mitm_log_path
+    reason_pipeline_dir = None
+    if not getattr(args, "no_reason_pipeline", False):
+        configured_pipeline_dir = getattr(args, "reason_pipeline_dir", None)
+        if configured_pipeline_dir:
+            reason_pipeline_dir = Path(configured_pipeline_dir).expanduser().resolve()
+        else:
+            reason_pipeline_dir = default_reason_pipeline_dir(Path(__file__).resolve().parent.parent)
+    reason_pipeline_event_dir = dataset_session.session_root / "reason-pipeline-events"
+    reason_pipeline_log_path = dataset_session.session_root / "reason-pipeline.ndjson"
+    reason_pipeline_db_path = dataset_session.session_root / "reason-pipeline.db"
     host_ip = discover_host_ip()
     broker_tcp_port = reserve_tcp_port()
     mitm_tcp_port = reserve_tcp_port()
@@ -795,6 +826,11 @@ def launch(args: argparse.Namespace) -> int:
             None,
             None,
             llm_log_path,
+            reason_pipeline_dir=reason_pipeline_dir,
+            reason_pipeline_agent_name=agent_name,
+            reason_pipeline_event_dir=reason_pipeline_event_dir,
+            reason_pipeline_log_path=reason_pipeline_log_path,
+            reason_pipeline_db_path=reason_pipeline_db_path,
         )
         wait_for_http_ready(args.web_port, timeout=10)
         resolv_path, hosts_path, nsswitch_path = write_runtime_network_files(runtime_dir)
@@ -879,6 +915,8 @@ def launch(args: argparse.Namespace) -> int:
         else:
             print("HTTP(S) proxy (mitm): disabled", file=sys.stderr)
         print(f"Dataset session: {dataset_session.session_root}", file=sys.stderr)
+        if reason_pipeline_dir is not None:
+            print(f"Reason pipeline: {reason_pipeline_dir}", file=sys.stderr)
         print(f"runsc logs: {runsc_logs_dir}", file=sys.stderr)
         runsc_cmd: list[str] = [
             str(runsc_bin),
