@@ -85,6 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--reason-pipeline-dir", default=None)
     serve_parser.add_argument("--reason-pipeline-agent-name", default="agent")
     serve_parser.add_argument("--reason-pipeline-event-dir", default=None)
+    serve_parser.add_argument("--reason-pipeline-output-dir", default=None)
     serve_parser.add_argument("--reason-pipeline-log-path", default=None)
     serve_parser.add_argument("--reason-pipeline-db-path", default=None)
     return parser

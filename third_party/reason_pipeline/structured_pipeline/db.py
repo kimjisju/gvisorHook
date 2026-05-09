@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -55,24 +54,6 @@ class PipelineDatabase:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(agent_name, schema_signature)
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS normalized_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    agent_name TEXT NOT NULL,
-                    schema_signature TEXT NOT NULL,
-                    syscall_name TEXT NOT NULL,
-                    affects_host_os INTEGER NOT NULL CHECK (affects_host_os IN (0, 1)),
-                    prompt_text TEXT NOT NULL,
-                    reasoning_text TEXT NOT NULL,
-                    request_json TEXT NOT NULL,
-                    response_json TEXT NOT NULL,
-                    syscall_json TEXT NOT NULL,
-                    parser_path TEXT NOT NULL,
-                    created_at TEXT NOT NULL
                 )
                 """
             )
@@ -202,57 +183,3 @@ class PipelineDatabase:
                 ),
             )
             connection.commit()
-
-    def save_normalized_event(
-        self,
-        *,
-        agent_name: str,
-        schema_signature: str,
-        syscall_name: str,
-        affects_host_os: int,
-        prompt_text: str,
-        reasoning_text: str,
-        request_payload: Any,
-        response_payload: Any,
-        syscall_payload: Any,
-        parser_path: str,
-    ) -> int:
-        request_json = json.dumps(request_payload, ensure_ascii=False, sort_keys=True)
-        response_json = json.dumps(response_payload, ensure_ascii=False, sort_keys=True)
-        syscall_json = json.dumps(syscall_payload, ensure_ascii=False, sort_keys=True)
-        timestamp = utcnow_iso()
-
-        with sqlite3.connect(self.db_path) as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO normalized_events (
-                    agent_name,
-                    schema_signature,
-                    syscall_name,
-                    affects_host_os,
-                    prompt_text,
-                    reasoning_text,
-                    request_json,
-                    response_json,
-                    syscall_json,
-                    parser_path,
-                    created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    agent_name,
-                    schema_signature,
-                    syscall_name,
-                    affects_host_os,
-                    prompt_text,
-                    reasoning_text,
-                    request_json,
-                    response_json,
-                    syscall_json,
-                    parser_path,
-                    timestamp,
-                ),
-            )
-            connection.commit()
-        return int(cursor.lastrowid)

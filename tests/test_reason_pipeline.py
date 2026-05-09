@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 from gvisor_hook.models import LLMExchange, SyscallEvent
 from gvisor_hook.reason_pipeline import (
@@ -12,6 +15,10 @@ from gvisor_hook.reason_pipeline import (
     default_reason_pipeline_dir,
     write_pipeline_event,
 )
+
+REASON_PIPELINE_DIR = Path(__file__).resolve().parent.parent / "third_party" / "reason_pipeline"
+sys.path.insert(0, str(REASON_PIPELINE_DIR))
+from structured_pipeline.core import SyscallNormalizationPipeline  # noqa: E402
 
 
 class ReasonPipelineIntegrationTests(unittest.TestCase):
@@ -65,6 +72,7 @@ class ReasonPipelineIntegrationTests(unittest.TestCase):
                 pipeline_dir=temp_path / "third_party" / "reason_pipeline",
                 agent_name="gemini",
                 event_dir=temp_path / "events",
+                output_dir=temp_path / "results",
                 log_path=temp_path / "reason.ndjson",
             )
             syscall_event = SyscallEvent(
@@ -82,6 +90,48 @@ class ReasonPipelineIntegrationTests(unittest.TestCase):
             payload = json.loads(event_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["agent_name"], "gemini")
             self.assertEqual(payload["syscall"]["name"], "execve")
+
+    def test_pipeline_writes_normalized_event_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            temp_path = Path(tempdir)
+            mapping_csv = temp_path / "mapping.csv"
+            mapping_csv.write_text(
+                "syscall_name,affects_host_os,category,rationale\n"
+                "openat,1,file,can affect host-visible files\n",
+                encoding="utf-8",
+            )
+            pipeline = SyscallNormalizationPipeline(
+                base_dir=REASON_PIPELINE_DIR,
+                db_path=temp_path / "pipeline-cache.db",
+                mapping_csv_path=mapping_csv,
+                parser_dir=temp_path / "parsers",
+                event_output_dir=temp_path / "events",
+            )
+            parser_result = SimpleNamespace(
+                schema_signature="schema123",
+                parser_path=temp_path / "parsers" / "parser.py",
+                prompt_text="please inspect /tmp/demo.txt",
+                reasoning_text="openat is requested for inspection",
+                source="test_parser",
+            )
+
+            with mock.patch.object(pipeline.parser_manager, "resolve", return_value=parser_result):
+                result = pipeline.process_event(
+                    agent_name="codex",
+                    request_payload={"input": "please inspect /tmp/demo.txt"},
+                    response_payload={"output": "I will inspect it"},
+                    syscall_payload={"id": "evt-json-1", "name": "openat", "path": "/tmp/demo.txt"},
+                )
+
+            self.assertEqual(result.status, "stored")
+            self.assertIsNotNone(result.event_path)
+            event_path = Path(result.event_path or "")
+            self.assertTrue(event_path.exists())
+            event = json.loads(event_path.read_text(encoding="utf-8"))
+            self.assertEqual(event["event_id"], "evt-json-1")
+            self.assertEqual(event["syscall_name"], "openat")
+            self.assertEqual(event["prompt_text"], "please inspect /tmp/demo.txt")
+            self.assertEqual(event["reasoning_text"], "openat is requested for inspection")
 
 
 if __name__ == "__main__":

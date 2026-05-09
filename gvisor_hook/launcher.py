@@ -517,6 +517,7 @@ def spawn_broker(
     reason_pipeline_dir: Path | None = None,
     reason_pipeline_agent_name: str | None = None,
     reason_pipeline_event_dir: Path | None = None,
+    reason_pipeline_output_dir: Path | None = None,
     reason_pipeline_log_path: Path | None = None,
     reason_pipeline_db_path: Path | None = None,
 ) -> subprocess.Popen[bytes]:
@@ -560,6 +561,8 @@ def spawn_broker(
                 reason_pipeline_agent_name or "agent",
                 "--reason-pipeline-event-dir",
                 str(reason_pipeline_event_dir),
+                "--reason-pipeline-output-dir",
+                str(reason_pipeline_output_dir),
                 "--reason-pipeline-log-path",
                 str(reason_pipeline_log_path),
             ]
@@ -787,6 +790,7 @@ def launch(args: argparse.Namespace) -> int:
         else:
             reason_pipeline_dir = default_reason_pipeline_dir(Path(__file__).resolve().parent.parent)
     reason_pipeline_event_dir = dataset_session.session_root / "reason-pipeline-events"
+    reason_pipeline_output_dir = dataset_session.session_root / "reason-pipeline-results"
     reason_pipeline_log_path = dataset_session.session_root / "reason-pipeline.ndjson"
     reason_pipeline_db_path = dataset_session.session_root / "reason-pipeline.db"
     host_ip = discover_host_ip()
@@ -829,6 +833,7 @@ def launch(args: argparse.Namespace) -> int:
             reason_pipeline_dir=reason_pipeline_dir,
             reason_pipeline_agent_name=agent_name,
             reason_pipeline_event_dir=reason_pipeline_event_dir,
+            reason_pipeline_output_dir=reason_pipeline_output_dir,
             reason_pipeline_log_path=reason_pipeline_log_path,
             reason_pipeline_db_path=reason_pipeline_db_path,
         )

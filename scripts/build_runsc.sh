@@ -7,8 +7,52 @@ OUT_DIR="$GVISOR_DIR/bin"
 BUILD_IMAGE="${BUILD_IMAGE:-ubuntu:22.04}"
 BAZELISK_VERSION="${BAZELISK_VERSION:-v1.25.0}"
 
+SYSTEM_PACKAGES=(ca-certificates curl gnupg mitmproxy)
+PYTHON_PACKAGES=(
+  "torch:torch"
+  "aiohttp:aiohttp"
+  "llama-cpp-python:llama_cpp"
+  "huggingface-hub:huggingface_hub"
+)
+
+missing_system_packages=()
 if ! command -v docker >/dev/null 2>&1; then
-  echo "docker is required to build the custom runsc binary." >&2
+  missing_system_packages+=("docker")
+fi
+for package in "${SYSTEM_PACKAGES[@]}"; do
+  if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -q "install ok installed"; then
+    missing_system_packages+=("$package")
+  fi
+done
+
+if ((${#missing_system_packages[@]})); then
+  echo "Missing required system packages: ${missing_system_packages[*]}" >&2
+  echo "Install them before running this script, then retry." >&2
+  echo "Ubuntu example: sudo apt-get update && sudo apt-get install -y docker.io ca-certificates curl gnupg mitmproxy" >&2
+  exit 1
+fi
+
+missing_python_packages=()
+for package_spec in "${PYTHON_PACKAGES[@]}"; do
+  package_name="${package_spec%%:*}"
+  import_name="${package_spec#*:}"
+  if ! python3 -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('${import_name}') else 1)" >/dev/null 2>&1; then
+    missing_python_packages+=("$package_name")
+  fi
+done
+
+if ((${#missing_python_packages[@]})); then
+  echo "Missing required Python packages: ${missing_python_packages[*]}" >&2
+  if [[ -z "${VIRTUAL_ENV:-}" ]]; then
+    echo "Python packages must be installed inside an active virtual environment." >&2
+    echo "Activate a venv first, for example:" >&2
+    echo "  python3 -m venv .venv" >&2
+    echo "  source .venv/bin/activate" >&2
+    echo "Then install the packages and rerun this script:" >&2
+  else
+    echo "Install the missing packages in the active venv and rerun this script:" >&2
+  fi
+  echo "  python -m pip install ${missing_python_packages[*]}" >&2
   exit 1
 fi
 

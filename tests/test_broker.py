@@ -81,6 +81,30 @@ class ApprovalBrokerTests(unittest.IsolatedAsyncioTestCase):
         writer.close()
         await writer.wait_closed()
 
+    async def test_auto_accept_allows_without_manual_decision(self) -> None:
+        self.assertTrue(await self.broker.set_auto_accept(True))
+        payload = {
+            "id": "evt-auto-1",
+            "container_id": "demo",
+            "pid": 10,
+            "tid": 11,
+            "syscall": "openat",
+            "summary": "open write-intent",
+            "path": "/tmp/demo.txt",
+            "argv": None,
+            "started_at": "2026-04-04T00:00:00Z",
+            "status": "pending",
+        }
+
+        reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
+        writer.write(json.dumps({"type": "syscall_event", "payload": payload}).encode() + b"\n")
+        await writer.drain()
+        response = json.loads((await reader.readline()).decode())
+        self.assertEqual(response["decision"], "allow")
+        self.assertIsNone(response["errno"])
+        writer.close()
+        await writer.wait_closed()
+
     async def test_file_backend_round_trip(self) -> None:
         payload = {
             "id": "evt-file-1",
@@ -112,6 +136,7 @@ class ApprovalBrokerTests(unittest.IsolatedAsyncioTestCase):
             pipeline_dir=pipeline_dir,
             agent_name="codex",
             event_dir=Path(self.tempdir.name) / "reason-events",
+            output_dir=Path(self.tempdir.name) / "reason-results",
             log_path=Path(self.tempdir.name) / "reason.ndjson",
             db_path=Path(self.tempdir.name) / "reason.db",
         )

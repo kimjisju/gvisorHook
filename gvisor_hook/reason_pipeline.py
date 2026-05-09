@@ -16,6 +16,7 @@ class ReasonPipelineConfig:
     pipeline_dir: Path
     agent_name: str
     event_dir: Path
+    output_dir: Path
     log_path: Path
     db_path: Path | None = None
 
@@ -103,6 +104,7 @@ async def run_reason_pipeline_event(
     ]
     if config.db_path is not None:
         command.extend(["--db-path", str(config.db_path)])
+    command.extend(["--event-output-dir", str(config.output_dir)])
 
     started_at = utc_now()
     proc = await asyncio.create_subprocess_exec(

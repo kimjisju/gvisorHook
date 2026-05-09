@@ -6,7 +6,7 @@ This repository builds a pipeline that stores:
 - proxy-hooked LLM response payloads
 - gVisor-hooked syscalls
 
-into structured SQLite tables for host-OS impact analysis.
+as per-event JSON files for host-OS impact analysis.
 
 ## What It Does
 
@@ -17,7 +17,7 @@ into structured SQLite tables for host-OS impact analysis.
 5. If no parser exists, generates one with Gemma using `runGemma4.py`.
 6. If the generated parser still fails, retries once with Gemma repair.
 7. If that also fails, saves a heuristic fallback parser so the pipeline can keep running.
-8. Stores normalized rows in SQLite.
+8. Stores normalized event data as one JSON file per event.
 
 ## Files
 
@@ -30,22 +30,24 @@ into structured SQLite tables for host-OS impact analysis.
 - `structured_pipeline/parser_manager.py`
   Parser generation, repair, validation, caching, and fallback handling.
 - `structured_pipeline/db.py`
-  SQLite schema and persistence logic.
+  SQLite-backed syscall mapping and parser cache.
 - `structured_pipeline/schema.py`
   Schema signature and syscall-name extraction helpers.
 - `data/syscall_host_impact_map.csv`
   Sample syscall host-impact mapping table.
 - `generated_parsers/`
   Saved agent-specific parser modules.
+- `data/events/`
+  Default output directory for normalized per-event JSON files.
 
-## SQLite Tables
+## Storage
 
 - `syscall_host_impact_map`
   Sample mapping table with `syscall_name`, `affects_host_os`, `category`, `rationale`.
 - `parser_registry`
   Stores generated parser code by `agent_name + schema_signature`.
-- `normalized_events`
-  Stores `syscall_name`, `prompt_text`, `reasoning_text`, and raw payload JSON.
+- Event JSON files
+  Store `syscall_name`, `prompt_text`, `reasoning_text`, parser metadata, and raw request/response/syscall payloads.
 
 ## Input JSON Format
 
@@ -63,7 +65,7 @@ into structured SQLite tables for host-OS impact analysis.
 ## Run
 
 ```bash
-./venv/bin/python pipeline.py --event-file examples/sample_event.json
+./venv/bin/python pipeline.py --event-file examples/sample_event.json --event-output-dir data/events
 ```
 
 Or pass files separately:

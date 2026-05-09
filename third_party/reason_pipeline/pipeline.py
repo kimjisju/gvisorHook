@@ -182,7 +182,7 @@ def _parse_sse_response(text: str) -> dict[str, Any] | None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Normalize proxy-hooked LLM data and gVisor syscalls into SQLite tables."
+        description="Normalize proxy-hooked LLM data and gVisor syscalls into per-event JSON files."
     )
     parser.add_argument("--event-file", type=Path, help="JSON file with agent_name, request, response, syscall")
     parser.add_argument("--agent-name", type=str, help="Agent name when using separate request/response/syscall files")
@@ -190,6 +190,7 @@ def main() -> None:
     parser.add_argument("--response-file", type=Path, help="JSON file for the proxy response payload")
     parser.add_argument("--syscall-file", type=Path, help="JSON file for the syscall payload")
     parser.add_argument("--db-path", type=Path, default=None, help="Override SQLite database path")
+    parser.add_argument("--event-output-dir", type=Path, default=None, help="Directory for per-event JSON results")
     parser.add_argument("--mapping-csv", type=Path, default=None, help="Override syscall mapping CSV path")
     parser.add_argument("--parser-dir", type=Path, default=None, help="Override generated parser directory")
     args = parser.parse_args()
@@ -224,6 +225,7 @@ def main() -> None:
         db_path=args.db_path,
         mapping_csv_path=args.mapping_csv,
         parser_dir=args.parser_dir,
+        event_output_dir=args.event_output_dir,
     )
     result = pipeline.process_event(
         agent_name=agent_name,
@@ -236,6 +238,7 @@ def main() -> None:
             {
                 "status": result.status,
                 "event_id": result.event_id,
+                "event_path": result.event_path,
                 "agent_name": result.agent_name,
                 "syscall_name": result.syscall_name,
                 "affects_host_os": result.affects_host_os,

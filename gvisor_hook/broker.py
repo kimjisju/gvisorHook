@@ -31,7 +31,8 @@ INDEX_HTML = """<!doctype html>
     header{padding:24px 28px 8px}h1{margin:0;font-size:1.8rem;letter-spacing:-.04em}.subtitle{color:var(--muted);margin-top:8px;max-width:880px;line-height:1.5}
     .banner{margin-top:14px;padding:14px 16px;border-radius:18px;background:rgba(15,118,110,.1);border:1px solid rgba(15,118,110,.18);font-size:.95rem;line-height:1.5}
     main{display:grid;grid-template-columns:minmax(280px,420px) minmax(380px,1fr);gap:18px;padding:16px 28px 28px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:24px;box-shadow:var(--shadow);backdrop-filter:blur(8px)}
-    .wide{grid-column:1/-1}.panel-header{display:flex;align-items:center;justify-content:space-between;padding:18px 20px 10px}.panel-title{font-weight:700;font-size:1rem}.panel-body{padding:0 18px 18px}.badge{font-size:.78rem;color:white;background:var(--accent);border-radius:999px;padding:6px 10px}
+    .wide{grid-column:1/-1}.panel-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:18px 20px 10px}.panel-title{font-weight:700;font-size:1rem}.panel-actions{display:flex;align-items:center;gap:10px}.panel-body{padding:0 18px 18px}.badge{font-size:.78rem;color:white;background:var(--accent);border-radius:999px;padding:6px 10px}
+    .toggle{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:999px;padding:5px 9px;background:rgba(255,255,255,.72);color:var(--muted);font-size:.82rem;font-weight:650;cursor:pointer}.toggle input{accent-color:var(--accent)}
     .queue-list,.log-list,.llm-list{display:grid;gap:12px;max-height:calc(100vh - 220px);overflow:auto;padding-right:4px}.llm-list{max-height:620px}
     .event,.exchange{border:1px solid var(--line);border-radius:18px;padding:14px;background:rgba(255,255,255,.8)}.event.focused{outline:2px solid rgba(15,118,110,.24)}
     .event-head{display:flex;align-items:start;justify-content:space-between;gap:12px;margin-bottom:8px}.syscall,.exchange-kind{font-family:"IBM Plex Mono","Consolas",monospace;font-size:.85rem;color:var(--accent)}.summary,.exchange-summary{font-weight:650;line-height:1.45;word-break:break-word}
@@ -52,7 +53,7 @@ INDEX_HTML = """<!doctype html>
   </header>
   <main>
     <section class="panel">
-      <div class="panel-header"><div class="panel-title">Pending approvals</div><div class="badge" id="pending-count">0 waiting</div></div>
+      <div class="panel-header"><div class="panel-title">Pending approvals</div><div class="panel-actions"><label class="toggle" title="Automatically allow pending and future syscalls"><input type="checkbox" id="auto-accept-toggle" /> <span>AutoAccept</span></label><div class="badge" id="pending-count">0 waiting</div></div></div>
       <div class="panel-body"><div class="connection" id="connection-state">Connecting...</div><div class="queue-list" id="pending-list"></div></div>
     </section>
     <section class="panel">
@@ -65,8 +66,8 @@ INDEX_HTML = """<!doctype html>
     </section>
   </main>
   <script>
-    const pendingList=document.getElementById("pending-list"); const eventLog=document.getElementById("event-log"); const llmLog=document.getElementById("llm-log"); const pendingCount=document.getElementById("pending-count"); const connectionState=document.getElementById("connection-state");
-    const state={events:[],exchanges:[],focusedId:null,wsConnected:false};
+    const pendingList=document.getElementById("pending-list"); const eventLog=document.getElementById("event-log"); const llmLog=document.getElementById("llm-log"); const pendingCount=document.getElementById("pending-count"); const connectionState=document.getElementById("connection-state"); const autoAcceptToggle=document.getElementById("auto-accept-toggle");
+    const state={events:[],exchanges:[],focusedId:null,wsConnected:false,autoAccept:false};
     function sortEvents(events){return [...events].sort((a,b)=>new Date(b.started_at)-new Date(a.started_at));}
     function escapeHtml(v){return String(v).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");}
     function prettyPayload(v){if(v===null||v===undefined)return ""; if(typeof v==="string") return v; try{return JSON.stringify(v,null,2);}catch(_err){return String(v);}}
@@ -95,6 +96,8 @@ INDEX_HTML = """<!doctype html>
       }
     }
     async function decide(id,decision){if(!id||!decision)return; await fetch(`/api/events/${id}/decision`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({decision})}); if(!state.wsConnected) await refreshSnapshot();}
+    async function setAutoAccept(enabled){autoAcceptToggle.disabled=true; try{const response=await fetch("/api/auto-accept",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled})}); if(response.ok){state.autoAccept=enabled;} if(!state.wsConnected) await refreshSnapshot();}finally{autoAcceptToggle.disabled=false; renderControls();}}
+    function renderControls(){autoAcceptToggle.checked=!!state.autoAccept;}
     function renderEvent(evt,actionable){
       const el=document.createElement("article"); el.className=`event ${evt.id===state.focusedId?"focused":""}`;
       el.dataset.anchorId=`event:${evt.id}`;
@@ -146,12 +149,13 @@ INDEX_HTML = """<!doctype html>
       restoreScrollState(llmLog,llmScroll);
     }
     function renderAll(){
+      renderControls();
       renderSyscalls();
       renderLLM();
     }
     function applyEnvelope(envelope){
       const payload=envelope.payload;
-      if(envelope.type==="snapshot"){state.events=payload.events; state.exchanges=payload.llm_exchanges||[]; renderAll(); return;}
+      if(envelope.type==="snapshot"){state.events=payload.events; state.exchanges=payload.llm_exchanges||[]; state.autoAccept=!!payload.auto_accept; renderAll(); return;}
       if(envelope.type==="event-upsert"){const idx=state.events.findIndex((evt)=>evt.id===payload.event.id); if(idx>=0) state.events[idx]=payload.event; else state.events.push(payload.event); renderSyscalls(); return;}
       if(envelope.type==="llm-upsert"){const idx=state.exchanges.findIndex((evt)=>evt.id===payload.exchange.id); if(idx>=0) state.exchanges[idx]=payload.exchange; else state.exchanges.push(payload.exchange); renderLLM();}
     }
@@ -169,6 +173,7 @@ INDEX_HTML = """<!doctype html>
       ws.onerror=()=>ws.close();
       ws.onmessage=(message)=>applyEnvelope(JSON.parse(message.data));
     }
+    autoAcceptToggle.addEventListener("change",async()=>{await setAutoAccept(autoAcceptToggle.checked);});
     document.addEventListener("keydown",async(event)=>{if(!state.focusedId)return; if(event.key==="y") await decide(state.focusedId,"allow"); if(event.key==="n") await decide(state.focusedId,"deny");});
     setInterval(()=>{if(!state.wsConnected) refreshSnapshot();}, 1000);
     refreshSnapshot();
@@ -203,6 +208,7 @@ class ApprovalBroker:
         self._llm_exchanges: OrderedDict[str, LLMExchange] = OrderedDict()
         self._pending: dict[str, asyncio.Future[str]] = {}
         self._websockets: set[web.WebSocketResponse] = set()
+        self._auto_accept = False
         self._ipc_server: asyncio.base_events.Server | None = None
         self._tcp_server: asyncio.base_events.Server | None = None
         self._lock = asyncio.Lock()
@@ -327,6 +333,8 @@ class ApprovalBroker:
                 async with self._lock:
                     self._events[event.id] = event
                     self._pending[event.id] = future
+                    if self._auto_accept:
+                        future.set_result("allow")
                 await self._broadcast(BrokerEnvelope("event-upsert", {"event": event.to_dict()}).to_dict())
                 self._start_reason_pipeline(event)
                 decision = "deny"
@@ -413,6 +421,8 @@ class ApprovalBroker:
             self._events[event.id] = event
             future = asyncio.get_running_loop().create_future()
             self._pending[event.id] = future
+            if self._auto_accept:
+                future.set_result("allow")
         LOG.info(
             "Received syscall event id=%s syscall=%s pid=%s path=%s (file backend)",
             event.id,
@@ -480,11 +490,25 @@ class ApprovalBroker:
             future.set_result(decision)
             return True
 
+    async def set_auto_accept(self, enabled: bool) -> bool:
+        async with self._lock:
+            self._auto_accept = enabled
+            if enabled:
+                for future in self._pending.values():
+                    if not future.done():
+                        future.set_result("allow")
+        await self._broadcast(await self.snapshot())
+        return enabled
+
     async def snapshot(self) -> dict[str, Any]:
         async with self._lock:
             events = [event.to_dict() for event in self._events.values()]
             llm_exchanges = [exchange.to_dict() for exchange in self._llm_exchanges.values()]
-        return BrokerEnvelope("snapshot", {"events": events, "llm_exchanges": llm_exchanges}).to_dict()
+            auto_accept = self._auto_accept
+        return BrokerEnvelope(
+            "snapshot",
+            {"events": events, "llm_exchanges": llm_exchanges, "auto_accept": auto_accept},
+        ).to_dict()
 
     async def _broadcast(self, message: dict[str, Any]) -> None:
         stale: list[web.WebSocketResponse] = []
@@ -532,11 +556,20 @@ def _install_routes(app: web.Application) -> None:
             raise web.HTTPNotFound(text=f"pending event {event_id} not found")
         return web.json_response({"ok": True})
 
+    async def auto_accept_handler(request: web.Request) -> web.Response:
+        payload = await request.json()
+        enabled = payload.get("enabled")
+        if not isinstance(enabled, bool):
+            raise web.HTTPBadRequest(text="enabled must be boolean")
+        await broker.set_auto_accept(enabled)
+        return web.json_response({"ok": True, "auto_accept": enabled})
+
     app.router.add_get("/", index)
     app.router.add_get("/api/health", health)
     app.router.add_get("/api/events", events_handler)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_post("/api/events/{event_id}/decision", decide_handler)
+    app.router.add_post("/api/auto-accept", auto_accept_handler)
 
 
 async def create_app(
@@ -624,6 +657,11 @@ def build_reason_pipeline_config(args: argparse.Namespace) -> ReasonPipelineConf
         return None
     pipeline_dir = Path(args.reason_pipeline_dir)
     event_dir = Path(args.reason_pipeline_event_dir) if args.reason_pipeline_event_dir else pipeline_dir / "events"
+    output_dir = (
+        Path(args.reason_pipeline_output_dir)
+        if args.reason_pipeline_output_dir
+        else pipeline_dir / "normalized-events"
+    )
     log_path = (
         Path(args.reason_pipeline_log_path)
         if args.reason_pipeline_log_path
@@ -634,6 +672,7 @@ def build_reason_pipeline_config(args: argparse.Namespace) -> ReasonPipelineConf
         pipeline_dir=pipeline_dir,
         agent_name=args.reason_pipeline_agent_name,
         event_dir=event_dir,
+        output_dir=output_dir,
         log_path=log_path,
         db_path=db_path,
     )
