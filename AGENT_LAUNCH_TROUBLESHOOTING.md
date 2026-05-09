@@ -395,6 +395,24 @@ _ENDPOINT
 <session>/reason-pipeline.ndjson
 ```
 
+정규화된 결과 JSON은 다음 디렉터리에 이벤트별 파일로 저장한다.
+
+```text
+<session>/reason-pipeline-results/<result-event-id>.json
+```
+
+기존 세션의 입력 event들을 순서대로 다시 result로 변환하려면 다음 명령을 사용한다.
+
+```bash
+python3 -m gvisor_hook replay-reason-pipeline <session>
+```
+
+기존 result JSON을 지우고 다시 만들려면:
+
+```bash
+python3 -m gvisor_hook replay-reason-pipeline <session> --clear-results
+```
+
 pipeline DB는 session별로 분리한다.
 
 ```text

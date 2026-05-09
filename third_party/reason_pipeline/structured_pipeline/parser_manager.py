@@ -12,7 +12,7 @@ from .db import PipelineDatabase
 from .schema import build_schema_signature, slugify
 
 PARSER_POLICY_MARKER = "DIALOG_PROMPT_CONTEXT_V2"
-MODEL_REPO_ID = "unsloth/gemma-4-E2B-it-GGUF"
+MODEL_REPO_ID = "unsloth/Qwen3.5-2B-GGUF"
 
 
 class ParserGenerationError(RuntimeError):
@@ -273,6 +273,174 @@ The corrected code must define PARSER_POLICY = "{PARSER_POLICY_MARKER}" and extr
             temperature=0.1,
         )
         return self._sanitize_code(raw_code)
+
+    def clean_prompt_text(self, prompt_text: str) -> str:
+        fallback = self._strip_system_reminders(prompt_text)
+        if self._has_known_prompt_contamination(prompt_text) and fallback:
+            return fallback
+        try:
+            cleaned = self._generate_response(
+                f"""
+Remove injected system/developer reminder blocks from the prompt below.
+
+Rules:
+- Preserve the user's real request and conversation context.
+- Remove XML-like system reminder blocks such as <system-reminder>...</system-reminder>.
+- Remove environment/date/tool availability boilerplate when it is not user-authored.
+- Return ONLY the cleaned prompt text. No explanation.
+
+Prompt:
+{prompt_text}
+""".strip(),
+                system_prompt="You clean extracted user prompt text.",
+                max_tokens=1200,
+                temperature=0.0,
+            ).strip()
+        except Exception:
+            return fallback
+        cleaned = self._strip_system_reminders(cleaned)
+        return cleaned or fallback
+
+    def normalize_reasoning_text(self, response_payload: Any, reasoning_text: str) -> str:
+        anthropic_text = self._extract_anthropic_stream_reasoning(response_payload)
+        if not anthropic_text:
+            return reasoning_text
+        if self._looks_like_response_metadata(reasoning_text):
+            return anthropic_text
+        if len(anthropic_text) > len(reasoning_text.strip()) + 20:
+            return anthropic_text
+        return reasoning_text
+
+    def _strip_system_reminders(self, prompt_text: str) -> str:
+        cleaned = re.sub(
+            r"<system-reminder\b[^>]*>.*?</system-reminder>",
+            "",
+            prompt_text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"<local-command-caveat\b[^>]*>.*?</local-command-caveat>",
+            "",
+            cleaned,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"<local-command-stdout\b[^>]*>.*?</local-command-stdout>",
+            "",
+            cleaned,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"<local-command-stderr\b[^>]*>.*?</local-command-stderr>",
+            "",
+            cleaned,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"<command-(?:name|message|args)\b[^>]*>.*?</command-(?:name|message|args)>",
+            "",
+            cleaned,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"(?is)as you answer the user's questions, you can use the following context:.*?important:.*?(?:\n\s*\n|$)",
+            "",
+            cleaned,
+        )
+        cleaned = re.sub(r"(?m)^[ \t]+$", "", cleaned)
+        cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+        return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+    def _has_known_prompt_contamination(self, prompt_text: str) -> bool:
+        lowered = prompt_text.lower()
+        markers = (
+            "<system-reminder",
+            "<local-command-caveat",
+            "<command-name>",
+            "<command-message>",
+            "<command-args>",
+            "<local-command-stdout>",
+            "<local-command-stderr>",
+        )
+        return any(marker in lowered for marker in markers)
+
+    def _looks_like_response_metadata(self, text: str) -> bool:
+        stripped = text.strip()
+        if not stripped:
+            return True
+        lines = [line.strip() for line in stripped.splitlines() if line.strip()]
+        if not lines:
+            return True
+        metadata_markers = {
+            "message",
+            "assistant",
+            "standard",
+            "global",
+            "tool_use",
+            "end_turn",
+        }
+        marker_hits = sum(1 for line in lines if line in metadata_markers or line.startswith("msg_"))
+        if marker_hits >= max(2, len(lines) // 2):
+            return True
+        if len(stripped) < 160 and any(line.startswith(("claude-", "gpt-", "gemini-")) for line in lines):
+            return True
+        return False
+
+    def _extract_anthropic_stream_reasoning(self, payload: Any) -> str:
+        if not isinstance(payload, list):
+            return ""
+        parts: list[str] = []
+        current_tool_name = ""
+        current_tool_json: list[str] = []
+
+        def flush_tool() -> None:
+            nonlocal current_tool_name, current_tool_json
+            text = "".join(current_tool_json).strip()
+            if current_tool_name or text:
+                if current_tool_name and text:
+                    parts.append(f"{current_tool_name}: {text}")
+                elif text:
+                    parts.append(text)
+            current_tool_name = ""
+            current_tool_json = []
+
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type == "content_block_start":
+                flush_tool()
+                block = item.get("content_block")
+                if isinstance(block, dict):
+                    block_type = block.get("type")
+                    if block_type == "tool_use":
+                        current_tool_name = str(block.get("name") or "").strip()
+                        block_input = block.get("input")
+                        if block_input:
+                            try:
+                                current_tool_json.append(json.dumps(block_input, ensure_ascii=False))
+                            except TypeError:
+                                current_tool_json.append(str(block_input))
+                    elif block_type in {"thinking", "text"}:
+                        text = block.get("thinking") or block.get("text")
+                        if isinstance(text, str) and text.strip():
+                            parts.append(text.strip())
+                continue
+            if item_type == "content_block_delta":
+                delta = item.get("delta")
+                if not isinstance(delta, dict):
+                    continue
+                text = delta.get("thinking") or delta.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+                partial_json = delta.get("partial_json")
+                if isinstance(partial_json, str):
+                    current_tool_json.append(partial_json)
+                continue
+            if item_type == "content_block_stop":
+                flush_tool()
+        flush_tool()
+        return "\n".join(part for part in parts if part).strip()
 
     def _generate_response(
         self,

@@ -15,10 +15,12 @@ import (
 
 	abiLinux "gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
+	"gvisor.dev/gvisor/pkg/hostarch"
+	"gvisor.dev/gvisor/pkg/log"
+	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/proc"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
-	"gvisor.dev/gvisor/pkg/log"
 )
 
 type approvalConfig struct {
@@ -67,6 +69,181 @@ var (
 	approvalTransportMu sync.Mutex
 	approvalTransport   *approvalStream
 )
+
+var approvalHookedSyscalls = map[string]struct{}{
+	"accept":             {},
+	"accept4":            {},
+	"afs_syscall":        {},
+	"alarm":              {},
+	"arch_prctl":         {},
+	"bind":               {},
+	"capset":             {},
+	"chdir":              {},
+	"chmod":              {},
+	"chown":              {},
+	"chroot":             {},
+	"clock_settime":      {},
+	"clone":              {},
+	"clone3":             {},
+	"close_range":        {},
+	"connect":            {},
+	"creat":              {},
+	"dup2":               {},
+	"dup3":               {},
+	"epoll_create":       {},
+	"epoll_create1":      {},
+	"epoll_ctl":          {},
+	"eventfd":            {},
+	"eventfd2":           {},
+	"execve":             {},
+	"execveat":           {},
+	"exit":               {},
+	"exit_group":         {},
+	"fallocate":          {},
+	"fchdir":             {},
+	"fchmod":             {},
+	"fchmodat":           {},
+	"fchown":             {},
+	"fchownat":           {},
+	"fcntl":              {},
+	"fdatasync":          {},
+	"flock":              {},
+	"fork":               {},
+	"fremovexattr":       {},
+	"fsetxattr":          {},
+	"fsync":              {},
+	"ftruncate":          {},
+	"futex":              {},
+	"futimesat":          {},
+	"inotify_add_watch":  {},
+	"inotify_init":       {},
+	"inotify_init1":      {},
+	"inotify_rm_watch":   {},
+	"io_cancel":          {},
+	"io_destroy":         {},
+	"io_setup":           {},
+	"io_submit":          {},
+	"io_uring_enter":     {},
+	"io_uring_setup":     {},
+	"ioctl":              {},
+	"keyctl":             {},
+	"kill":               {},
+	"lchown":             {},
+	"link":               {},
+	"linkat":             {},
+	"listen":             {},
+	"lremovexattr":       {},
+	"lsetxattr":          {},
+	"mbind":              {},
+	"membarrier":         {},
+	"memfd_create":       {},
+	"mkdir":              {},
+	"mkdirat":            {},
+	"mknod":              {},
+	"mknodat":            {},
+	"mlock":              {},
+	"mlock2":             {},
+	"mlockall":           {},
+	"mmap":               {},
+	"mount":              {},
+	"mprotect":           {},
+	"mq_open":            {},
+	"mq_unlink":          {},
+	"mremap":             {},
+	"msgctl":             {},
+	"msgget":             {},
+	"msgsnd":             {},
+	"msync":              {},
+	"munlock":            {},
+	"munlockall":         {},
+	"open":               {},
+	"openat":             {},
+	"pipe":               {},
+	"pipe2":              {},
+	"pivot_root":         {},
+	"prctl":              {},
+	"prlimit64":          {},
+	"process_vm_writev":  {},
+	"ptrace":             {},
+	"pwrite64":           {},
+	"pwritev":            {},
+	"pwritev2":           {},
+	"removexattr":        {},
+	"rename":             {},
+	"renameat":           {},
+	"renameat2":          {},
+	"rmdir":              {},
+	"rt_sigaction":       {},
+	"rt_sigprocmask":     {},
+	"rt_sigqueueinfo":    {},
+	"rt_tgsigqueueinfo":  {},
+	"sched_setaffinity":  {},
+	"sched_setscheduler": {},
+	"seccomp":            {},
+	"semctl":             {},
+	"semget":             {},
+	"semop":              {},
+	"semtimedop":         {},
+	"sendfile":           {},
+	"sendmmsg":           {},
+	"sendmsg":            {},
+	"sendto":             {},
+	"set_mempolicy":      {},
+	"set_robust_list":    {},
+	"setdomainname":      {},
+	"setgid":             {},
+	"setgroups":          {},
+	"sethostname":        {},
+	"setitimer":          {},
+	"setns":              {},
+	"setpgid":            {},
+	"setpriority":        {},
+	"setregid":           {},
+	"setresgid":          {},
+	"setresuid":          {},
+	"setreuid":           {},
+	"setrlimit":          {},
+	"setsid":             {},
+	"setsockopt":         {},
+	"setuid":             {},
+	"setxattr":           {},
+	"shmat":              {},
+	"shmctl":             {},
+	"shmget":             {},
+	"shutdown":           {},
+	"sigaltstack":        {},
+	"signalfd":           {},
+	"signalfd4":          {},
+	"socket":             {},
+	"socketpair":         {},
+	"splice":             {},
+	"symlink":            {},
+	"symlinkat":          {},
+	"sync":               {},
+	"sync_file_range":    {},
+	"syncfs":             {},
+	"syslog":             {},
+	"tee":                {},
+	"tgkill":             {},
+	"timer_create":       {},
+	"timer_delete":       {},
+	"timer_settime":      {},
+	"timerfd_create":     {},
+	"timerfd_settime":    {},
+	"tkill":              {},
+	"truncate":           {},
+	"umask":              {},
+	"umount2":            {},
+	"unlink":             {},
+	"unlinkat":           {},
+	"unshare":            {},
+	"utime":              {},
+	"utimensat":          {},
+	"utimes":             {},
+	"vfork":              {},
+	"write":              {},
+	"writev":             {},
+}
 
 type approvalStream struct {
 	conn    net.Conn
@@ -258,6 +435,115 @@ func filePath(t *kernel.Task, file *vfs.FileDescription) string {
 	return path
 }
 
+func installApprovalHooks(table *kernel.SyscallTable) {
+	for sysno, sc := range table.Table {
+		if _, ok := approvalHookedSyscalls[sc.Name]; !ok || sc.Fn == nil {
+			continue
+		}
+		syscallName := sc.Name
+		fn := sc.Fn
+		sc.Fn = func(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, *kernel.SyscallControl, error) {
+			if err := approveGenericSyscall(t, syscallName, args); err != nil {
+				return 0, nil, err
+			}
+			return fn(t, sysno, args)
+		}
+		table.Table[sysno] = sc
+	}
+}
+
+func approveGenericSyscall(t *kernel.Task, syscallName string, args arch.SyscallArguments) error {
+	path, argv := approvalSyscallDetails(t, syscallName, args)
+	summary := fmt.Sprintf("%s(%#x, %#x, %#x, %#x, %#x, %#x)",
+		syscallName,
+		args[0].Uint64(),
+		args[1].Uint64(),
+		args[2].Uint64(),
+		args[3].Uint64(),
+		args[4].Uint64(),
+		args[5].Uint64(),
+	)
+	if path != "" {
+		summary = fmt.Sprintf("%s %s", syscallName, path)
+	}
+	if len(argv) > 0 {
+		summary = fmt.Sprintf("%s %s", summary, strings.Join(argv, " "))
+	}
+	return requestApproval(t, syscallName, summary, path, argv)
+}
+
+func approvalSyscallDetails(t *kernel.Task, syscallName string, args arch.SyscallArguments) (string, []string) {
+	switch syscallName {
+	case "chdir", "chmod", "chown", "chroot", "creat", "lchown", "mkdir", "mknod", "mq_open", "mq_unlink", "open", "removexattr", "rmdir", "setxattr", "symlink", "truncate", "unlink", "utime", "utimes":
+		return copyApprovalPath(t, args[0].Pointer()), nil
+	case "execve":
+		path := copyApprovalPath(t, args[0].Pointer())
+		return path, copyApprovalArgv(t, args[1].Pointer())
+	case "execveat":
+		path := copyApprovalPath(t, args[1].Pointer())
+		return path, copyApprovalArgv(t, args[2].Pointer())
+	case "fchmodat", "fchownat", "fremovexattr", "futimesat", "linkat", "mkdirat", "mknodat", "openat", "renameat", "renameat2", "symlinkat", "unlinkat", "utimensat":
+		return copyApprovalPath(t, args[1].Pointer()), nil
+	case "link", "rename":
+		oldPath := copyApprovalPath(t, args[0].Pointer())
+		newPath := copyApprovalPath(t, args[1].Pointer())
+		if oldPath == "" {
+			return newPath, nil
+		}
+		if newPath == "" {
+			return oldPath, nil
+		}
+		return oldPath + " -> " + newPath, nil
+	case "lremovexattr", "lsetxattr":
+		return copyApprovalPath(t, args[0].Pointer()), nil
+	case "mount":
+		source := copyApprovalPath(t, args[0].Pointer())
+		target := copyApprovalPath(t, args[1].Pointer())
+		if source == "" {
+			return target, nil
+		}
+		if target == "" {
+			return source, nil
+		}
+		return source + " -> " + target, nil
+	case "pivot_root":
+		newRoot := copyApprovalPath(t, args[0].Pointer())
+		putOld := copyApprovalPath(t, args[1].Pointer())
+		if newRoot == "" {
+			return putOld, nil
+		}
+		if putOld == "" {
+			return newRoot, nil
+		}
+		return newRoot + " -> " + putOld, nil
+	case "umount2":
+		return copyApprovalPath(t, args[0].Pointer()), nil
+	}
+	return "", nil
+}
+
+func copyApprovalPath(t *kernel.Task, addr hostarch.Addr) string {
+	if addr == 0 {
+		return ""
+	}
+	path, err := t.CopyInString(addr, abiLinux.PATH_MAX)
+	if err != nil {
+		return "[unknown]"
+	}
+	return path
+}
+
+func copyApprovalArgv(t *kernel.Task, addr hostarch.Addr) []string {
+	if addr == 0 {
+		return nil
+	}
+	argv, err := t.CopyInVector(addr, ExecMaxElemSize, ExecMaxTotalSize)
+	if err != nil {
+		return nil
+	}
+	return argv
+}
+
 func requestApproval(t *kernel.Task, syscallName, summary, path string, argv []string) error {
 	cfg := loadApprovalConfigForTask(t)
 	if !cfg.enabled {
@@ -399,6 +685,9 @@ func requestApprovalViaSocket(cfg approvalConfig, syscallName string, event appr
 }
 
 func approveOpen(t *kernel.Task, syscallName, path string, flags uint32) error {
+	if _, ok := approvalHookedSyscalls[syscallName]; ok {
+		return nil
+	}
 	if !shouldApproveOpenFlags(flags) {
 		return nil
 	}
@@ -409,6 +698,9 @@ func approveOpen(t *kernel.Task, syscallName, path string, flags uint32) error {
 }
 
 func approvePathMutation(t *kernel.Task, syscallName, path string) error {
+	if _, ok := approvalHookedSyscalls[syscallName]; ok {
+		return nil
+	}
 	if !shouldMonitorApprovalPath(path) {
 		return nil
 	}
@@ -416,6 +708,9 @@ func approvePathMutation(t *kernel.Task, syscallName, path string) error {
 }
 
 func approveRename(t *kernel.Task, oldPath, newPath string) error {
+	if _, ok := approvalHookedSyscalls["rename"]; ok {
+		return nil
+	}
 	if !shouldMonitorApprovalPath(oldPath) && !shouldMonitorApprovalPath(newPath) {
 		return nil
 	}
@@ -423,6 +718,9 @@ func approveRename(t *kernel.Task, oldPath, newPath string) error {
 }
 
 func approveWriteFD(t *kernel.Task, syscallName string, file *vfs.FileDescription, count int) error {
+	if _, ok := approvalHookedSyscalls[syscallName]; ok {
+		return nil
+	}
 	path := filePath(t, file)
 	if !shouldMonitorApprovalPath(path) {
 		return nil
@@ -431,6 +729,9 @@ func approveWriteFD(t *kernel.Task, syscallName string, file *vfs.FileDescriptio
 }
 
 func approveExec(t *kernel.Task, path string, argv []string) error {
+	if _, ok := approvalHookedSyscalls["execve"]; ok {
+		return nil
+	}
 	if shouldIgnoreApprovalPath(path) {
 		return nil
 	}

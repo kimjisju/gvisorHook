@@ -47,7 +47,7 @@ as per-event JSON files for host-OS impact analysis.
 - `parser_registry`
   Stores generated parser code by `agent_name + schema_signature`.
 - Event JSON files
-  Store `syscall_name`, `prompt_text`, `reasoning_text`, parser metadata, and raw request/response/syscall payloads.
+  Store `syscall`, `summary`, `path`, `argv`, `prompt_text`, `reasoning_text`, syscall impact metadata, and creation time.
 
 ## Input JSON Format
 

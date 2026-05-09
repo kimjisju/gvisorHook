@@ -6,6 +6,7 @@ import sys
 
 from .broker import serve
 from .launcher import launch
+from .reason_pipeline import replay_reason_pipeline_session
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -88,6 +89,22 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--reason-pipeline-output-dir", default=None)
     serve_parser.add_argument("--reason-pipeline-log-path", default=None)
     serve_parser.add_argument("--reason-pipeline-db-path", default=None)
+
+    replay_parser = subparsers.add_parser(
+        "replay-reason-pipeline",
+        help="reprocess a dataset session's reason-pipeline-events into reason-pipeline-results",
+    )
+    replay_parser.add_argument("session_path", help="Dataset session directory containing reason-pipeline-events")
+    replay_parser.add_argument(
+        "--reason-pipeline-dir",
+        default=None,
+        help="Path to reason_pipeline. If omitted, third_party/reason_pipeline is used.",
+    )
+    replay_parser.add_argument(
+        "--clear-results",
+        action="store_true",
+        help="Delete existing JSON files in reason-pipeline-results before replaying.",
+    )
     return parser
 
 
@@ -99,6 +116,23 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "serve":
         asyncio.run(serve(args))
         return 0
+    if args.command == "replay-reason-pipeline":
+        from pathlib import Path
+
+        result = asyncio.run(
+            replay_reason_pipeline_session(
+                Path(args.session_path),
+                pipeline_dir=Path(args.reason_pipeline_dir) if args.reason_pipeline_dir else None,
+                clear_results=args.clear_results,
+            )
+        )
+        print(f"Session: {result.session_root}")
+        print(f"Events: {result.event_count}")
+        print(f"Succeeded: {result.success_count}")
+        print(f"Failed: {result.failure_count}")
+        print(f"Results: {result.output_dir}")
+        print(f"Replay log: {result.log_path}")
+        return 1 if result.failure_count else 0
     parser.error(f"unknown command: {args.command}")
     return 1
 

@@ -727,6 +727,8 @@ var ARM64 = &kernel.SyscallTable{
 }
 
 func init() {
+	installApprovalHooks(AMD64)
+	installApprovalHooks(ARM64)
 	kernel.RegisterSyscallTable(AMD64)
 	kernel.RegisterSyscallTable(ARM64)
 }

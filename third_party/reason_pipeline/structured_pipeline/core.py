@@ -17,6 +17,9 @@ class PipelineResult:
     syscall_name: str
     affects_host_os: int
     reason: str
+    syscall_summary: str | None = None
+    syscall_path: str | None = None
+    syscall_argv: list[str] | None = None
     event_id: str | None = None
     event_path: str | None = None
     agent_name: str | None = None
@@ -60,21 +63,18 @@ class SyscallNormalizationPipeline:
 
         if syscall_impact.affects_host_os == 0:
             event_id, event_path = self._write_event_json(
-                status="skipped",
                 agent_name=agent_name,
                 syscall_impact=syscall_impact,
-                request_payload=request_payload,
-                response_payload=response_payload,
                 syscall_payload=syscall_payload,
                 prompt_text="",
                 reasoning_text="",
-                parser_path=None,
-                schema_signature=None,
-                parser_source=None,
             )
             return PipelineResult(
                 status="skipped",
                 syscall_name=syscall_impact.syscall_name,
+                syscall_summary=self._syscall_summary(syscall_payload),
+                syscall_path=self._syscall_path(syscall_payload),
+                syscall_argv=self._syscall_argv(syscall_payload),
                 affects_host_os=0,
                 reason=self._format_skip_reason(syscall_impact),
                 event_id=event_id,
@@ -87,29 +87,31 @@ class SyscallNormalizationPipeline:
             request_payload=request_payload,
             response_payload=response_payload,
         )
+        prompt_text = self._clean_prompt_if_abrupt(agent_name, parser_result.prompt_text)
+        reasoning_text = self.parser_manager.normalize_reasoning_text(
+            response_payload,
+            parser_result.reasoning_text,
+        )
         event_id, event_path = self._write_event_json(
-            status="stored",
             agent_name=agent_name,
             syscall_impact=syscall_impact,
-            request_payload=request_payload,
-            response_payload=response_payload,
             syscall_payload=syscall_payload,
-            prompt_text=parser_result.prompt_text,
-            reasoning_text=parser_result.reasoning_text,
-            parser_path=str(parser_result.parser_path),
-            schema_signature=parser_result.schema_signature,
-            parser_source=parser_result.source,
+            prompt_text=prompt_text,
+            reasoning_text=reasoning_text,
         )
         return PipelineResult(
             status="stored",
             syscall_name=syscall_impact.syscall_name,
+            syscall_summary=self._syscall_summary(syscall_payload),
+            syscall_path=self._syscall_path(syscall_payload),
+            syscall_argv=self._syscall_argv(syscall_payload),
             affects_host_os=syscall_impact.affects_host_os,
             reason=syscall_impact.rationale,
             event_id=event_id,
             event_path=str(event_path),
             agent_name=agent_name,
-            prompt_text=parser_result.prompt_text,
-            reasoning_text=parser_result.reasoning_text,
+            prompt_text=prompt_text,
+            reasoning_text=reasoning_text,
             parser_path=str(parser_result.parser_path),
             schema_signature=parser_result.schema_signature,
             parser_source=parser_result.source,
@@ -118,17 +120,11 @@ class SyscallNormalizationPipeline:
     def _write_event_json(
         self,
         *,
-        status: str,
         agent_name: str,
         syscall_impact: SyscallImpact,
-        request_payload: Any,
-        response_payload: Any,
         syscall_payload: Any,
         prompt_text: str,
         reasoning_text: str,
-        parser_path: str | None,
-        schema_signature: str | None,
-        parser_source: str | None,
     ) -> tuple[str, Path]:
         self.event_output_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -140,9 +136,11 @@ class SyscallNormalizationPipeline:
             event_path = self.event_output_dir / f"{event_id}-{counter}.json"
         payload = {
             "event_id": event_path.stem,
-            "status": status,
             "agent_name": agent_name,
-            "syscall_name": syscall_impact.syscall_name,
+            "syscall": syscall_impact.syscall_name,
+            "summary": self._syscall_summary(syscall_payload),
+            "path": self._syscall_path(syscall_payload),
+            "argv": self._syscall_argv(syscall_payload),
             "affects_host_os": syscall_impact.affects_host_os,
             "syscall_category": syscall_impact.category,
             "reason": syscall_impact.rationale,
@@ -150,16 +148,73 @@ class SyscallNormalizationPipeline:
             "is_known_syscall": syscall_impact.is_known,
             "prompt_text": prompt_text,
             "reasoning_text": reasoning_text,
-            "schema_signature": schema_signature,
-            "parser_source": parser_source,
-            "parser_path": parser_path,
-            "request": request_payload,
-            "response": response_payload,
-            "syscall": syscall_payload,
             "created_at": timestamp,
         }
         event_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return event_path.stem, event_path
+
+    def _syscall_summary(self, syscall_payload: Any) -> str | None:
+        if isinstance(syscall_payload, dict):
+            value = syscall_payload.get("summary")
+            if isinstance(value, str):
+                return value
+        return None
+
+    def _syscall_path(self, syscall_payload: Any) -> str | None:
+        if isinstance(syscall_payload, dict):
+            value = syscall_payload.get("path")
+            if isinstance(value, str):
+                return value
+        return None
+
+    def _syscall_argv(self, syscall_payload: Any) -> list[str] | None:
+        if isinstance(syscall_payload, dict):
+            value = syscall_payload.get("argv")
+            if isinstance(value, list):
+                return [str(item) for item in value]
+        return None
+
+    def _clean_prompt_if_abrupt(self, agent_name: str, prompt_text: str) -> str:
+        if self._has_prompt_contamination(prompt_text):
+            return self.parser_manager.clean_prompt_text(prompt_text)
+        previous_length = self._previous_prompt_length(agent_name)
+        if previous_length is None or len(prompt_text) <= previous_length + 1000:
+            return prompt_text
+        return self.parser_manager.clean_prompt_text(prompt_text)
+
+    def _has_prompt_contamination(self, prompt_text: str) -> bool:
+        lowered = prompt_text.lower()
+        markers = (
+            "<system-reminder",
+            "as you answer the user's questions",
+            "<local-command-caveat",
+            "<command-name>",
+            "<command-message>",
+            "<command-args>",
+            "<local-command-stdout>",
+            "<local-command-stderr>",
+        )
+        return any(marker in lowered for marker in markers)
+
+    def _previous_prompt_length(self, agent_name: str) -> int | None:
+        if not self.event_output_dir.is_dir():
+            return None
+        candidates = sorted(
+            self.event_output_dir.glob("*.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for candidate in candidates:
+            try:
+                payload = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if payload.get("agent_name") != agent_name:
+                continue
+            prompt_text = payload.get("prompt_text")
+            if isinstance(prompt_text, str):
+                return len(prompt_text)
+        return None
 
     def _event_id(self, syscall_payload: Any, syscall_name: str, timestamp: str) -> str:
         candidate = None

@@ -2,17 +2,17 @@ from functools import lru_cache
 
 from llama_cpp import Llama
 
-MODEL_REPO_ID = "unsloth/gemma-4-E2B-it-GGUF"
-MODEL_FILENAME = "*Q8_0.gguf"
+MODEL_REPO_ID = "unsloth/Qwen3.5-2B-GGUF"
+MODEL_FILENAME = "*Q4_K_M.gguf"
 DEFAULT_SYSTEM_PROMPT = "당신은 유능하고 친절한 AI 어시스턴트입니다."
-DEFAULT_N_CTX = 4096
+DEFAULT_N_CTX = 32768
 DEFAULT_MAX_TOKENS = 500
 DEFAULT_TEMPERATURE = 0.7
 
 
 @lru_cache(maxsize=1)
 def get_model() -> Llama:
-    """Load Gemma once and reuse it across parser-generation requests."""
+    """Load the local parser-generation model once and reuse it."""
     return Llama.from_pretrained(
         repo_id=MODEL_REPO_ID,
         filename=MODEL_FILENAME,
