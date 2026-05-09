@@ -5,7 +5,7 @@
 
 ## 1. 프로젝트 목적
 
-이 프로젝트의 목표는 `Open Interpreter` 바이너리(`/home/kimjisu/.local/bin/interpreter`)를 수정하지 않고 그대로 사용하면서, gVisor sandbox 안에서 실행되는 AI Agent의 주요 시스템 호출을 가로채고, 별도 웹 UI에서 사용자 승인(`allow`) 또는 거부(`deny`)를 받을 수 있게 하는 것이다.
+이 프로젝트의 목표는 로컬 AI Agent 바이너리를 수정하지 않고 그대로 사용하면서, gVisor sandbox 안에서 실행되는 AI Agent의 주요 시스템 호출을 가로채고, 별도 웹 UI에서 사용자 승인(`allow`) 또는 거부(`deny`)를 받을 수 있게 하는 것이다.
 
 사용자 요구사항은 다음과 같다.
 
@@ -137,7 +137,7 @@ MVP 기준으로 다음 syscall 계열을 대상으로 설계되어 있다.
 
 ### 6.1 Open Interpreter가 sandbox 안에서 실행됨
 
-- `python3 -m gvisor_hook launch --workdir /home/kimjisu/gvisorHook --web-port 8080`
+- `python3 -m gvisor_hook launch --workdir <workspace> --web-port 8080`
 - 위 명령으로 Open Interpreter 프롬프트가 뜨는 상태까지는 반복적으로 확인했다.
 
 ### 6.2 웹 승인 UI 자체는 동작함
@@ -321,28 +321,28 @@ approval 이벤트를 보낸 뒤 결과를 기다리는 과정에서 sentry가 E
 ### 빌드
 
 ```bash
-cd /home/kimjisu/gvisorHook
+cd <workspace>
 ./scripts/build_runsc.sh
 ```
 
 ### 실행
 
 ```bash
-cd /home/kimjisu/gvisorHook
-python3 -m gvisor_hook launch --workdir /home/kimjisu/gvisorHook --web-port 8080
+cd <workspace>
+python3 -m gvisor_hook launch --workdir <workspace> --web-port 8080
 ```
 
 ### 브로커 테스트
 
 ```bash
-cd /home/kimjisu/gvisorHook
+cd <workspace>
 python3 -m unittest tests/test_broker.py
 ```
 
 ### Python 문법 확인
 
 ```bash
-cd /home/kimjisu/gvisorHook
+cd <workspace>
 python3 -m py_compile gvisor_hook/*.py
 ```
 

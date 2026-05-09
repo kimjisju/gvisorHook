@@ -55,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--reason-pipeline-dir",
         default=None,
         help=(
-            "Path to kimjisju/reason_pipeline. If omitted, third_party/reason_pipeline is used when present."
+            "Path to reason_pipeline. If omitted, third_party/reason_pipeline is used when present."
         ),
     )
     launch_parser.add_argument(

@@ -40,7 +40,7 @@
   "syscall": {
     "name": "openat",
     "args": {
-      "pathname": "/home/demo/.bashrc",
+      "pathname": "/tmp/workspace/.bashrc",
       "flags": [
         "O_WRONLY",
         "O_CREAT",

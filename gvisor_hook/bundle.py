@@ -170,8 +170,6 @@ def write_bundle_config(
                 {"destination": "/usr/bin/git", "type": "bind", "source": "/usr/bin/git", "options": ["bind", "ro"]},
                 {"destination": "/usr/bin/getconf", "type": "bind", "source": "/usr/bin/getconf", "options": ["bind", "ro"]},
                 {"destination": "/usr/bin/lsb_release", "type": "bind", "source": "/usr/bin/lsb_release", "options": ["bind", "ro"]},
-	            #{"destination": "/tmp/open-interpreter/bin/interpreter", "type": "bind", "source": "/home/kimjisu/.local/bin/interpreter", "options": ["bind", "ro"]},
-            #{"destination": "/tmp/open-interpreter/site-packages", "type": "bind", "source": "/home/kimjisu/.local/lib/python3.10/site-packages", "options": ["rbind", "ro"]},
                 *(extra_mounts or []),
         ],
         "linux": {

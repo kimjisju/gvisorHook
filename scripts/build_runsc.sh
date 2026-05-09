@@ -65,7 +65,7 @@ docker manifest inspect "$BUILD_IMAGE" >/dev/null 2>&1 || {
 
 docker run --rm \
   -u 0:0 \
-  -e USER="${USER:-kimjisu}" \
+  -e USER="${USER:-builder}" \
   -e HOME="/tmp" \
   -e DEBIAN_FRONTEND=noninteractive \
   -v "$GVISOR_DIR:/workspace" \

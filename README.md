@@ -79,7 +79,7 @@ Go patch formatting이 필요하면:
 ```bash
 python3 -m gvisor_hook launch \
   --agent-cmd codex \
-  --workdir /home/tmdgusebbu/workspace/gvisorHook \
+  --workdir <workspace> \
   --web-port 8080
 ```
 
@@ -94,7 +94,7 @@ Gemini 예:
 ```bash
 python3 -m gvisor_hook launch \
   --agent-cmd gemini \
-  --workdir /home/tmdgusebbu/workspace/gvisorHook \
+  --workdir <workspace> \
   --web-port 8080
 ```
 
@@ -103,7 +103,7 @@ agent 명령에 인자가 필요하면 문자열로 넘길 수 있다.
 ```bash
 python3 -m gvisor_hook launch \
   --agent-cmd "codex exec --json \"README 찾아줘\"" \
-  --workdir /home/tmdgusebbu/workspace/gvisorHook
+  --workdir <workspace>
 ```
 
 Codex non-interactive 편의 모드:
@@ -112,7 +112,7 @@ Codex non-interactive 편의 모드:
 python3 -m gvisor_hook launch \
   --prompt "README 파일을 찾아줘" \
   --codex-model gpt-5.5 \
-  --workdir /home/tmdgusebbu/workspace/gvisorHook
+  --workdir <workspace>
 ```
 
 ## 주요 옵션
@@ -328,7 +328,7 @@ export OPENAI_BASE_URL=https://factchat-cloud.mindlogic.ai/v1/gateway
 
 python3 -m gvisor_hook launch \
   --agent-cmd codex \
-  --workdir /home/tmdgusebbu/workspace/gvisorHook
+  --workdir <workspace>
 ```
 
 `gvisorHook`의 mitmproxy는 network path에 들어가지만, agent가 바라보는 upstream base URL은 env 그대로 유지된다.

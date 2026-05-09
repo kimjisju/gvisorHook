@@ -95,8 +95,6 @@ def find_runsc_binary() -> Path:
     candidates = [
         repo_root / "third_party" / "gvisor" / "bin" / "runsc-hook",
         repo_root / "third_party" / "gvisor" / "bazel-bin" / "runsc" / "runsc_" / "runsc",
-        Path("/home/kimjisu/gvisorHook/third_party/gvisor/bin/runsc-hook"),
-        Path("/home/kimjisu/gvisorHook/third_party/gvisor/bazel-bin/runsc/runsc_/runsc"),
         Path(shutil.which("runsc") or ""),
     ]
     for candidate in candidates:
@@ -108,7 +106,6 @@ def find_runsc_binary() -> Path:
 def find_mitmdump_binary() -> Path:
     candidates = [
         Path.home() / "download" / "mitmdump",
-        Path("/home/kimjisu/download/mitmdump"),
     ]
     resolved = shutil.which("mitmdump")
     if resolved:
@@ -116,7 +113,7 @@ def find_mitmdump_binary() -> Path:
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate
-    raise FileNotFoundError("Could not find mitmdump. Expected /home/kimjisu/download/mitmdump.")
+    raise FileNotFoundError("Could not find mitmdump. Install it or add it to PATH.")
 
 
 def check_mitmdump_command(command: list[str]) -> subprocess.CompletedProcess[str]:

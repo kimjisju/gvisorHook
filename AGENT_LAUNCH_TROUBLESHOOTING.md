@@ -87,7 +87,7 @@ Permission denied
 
 원인:
 
-- config를 `/home/.gemini` 같은 위치에 mount하려 했다.
+- config를 sandbox의 runtime home 바깥 위치에 mount하려 했다.
 - sandbox rootfs와 `/home` mount 구조 때문에 권한/경로가 어긋났다.
 
 해결:
@@ -122,8 +122,8 @@ error setting up FS: opening /usr/bin/node: open /usr/bin/node: no such file or 
 - 현재 환경의 실제 Codex와 Node는 nvm 아래에 있었다.
 
 ```text
-/home/tmdgusebbu/.nvm/versions/node/v24.15.0/bin/node
-/home/tmdgusebbu/.nvm/versions/node/v24.15.0/bin/codex
+<user-home>/.nvm/versions/node/<node-version>/bin/node
+<user-home>/.nvm/versions/node/<node-version>/bin/codex
 ```
 
 해결:
@@ -201,9 +201,9 @@ argv:
   /tmp/agent/node_modules/@openai/codex/bin/codex.js
 
 mounts:
-  /tmp/agent/node_modules -> /home/tmdgusebbu/.nvm/versions/node/v24.15.0/lib/node_modules
-  /tmp/agent/bin/node     -> /home/tmdgusebbu/.nvm/versions/node/v24.15.0/bin/node
-  /tmp/agent-home/.codex  -> /home/tmdgusebbu/.codex
+  /tmp/agent/node_modules -> <user-home>/.nvm/versions/node/<node-version>/lib/node_modules
+  /tmp/agent/bin/node     -> <user-home>/.nvm/versions/node/<node-version>/bin/node
+  /tmp/agent-home/.codex  -> <user-home>/.codex
 ```
 
 ## mitmdump 실행 문제
@@ -380,7 +380,7 @@ _ENDPOINT
 
 ## Reason Pipeline
 
-`kimjisju/reason_pipeline`은 `third_party/reason_pipeline`에 둔다.
+`reason_pipeline`은 `third_party/reason_pipeline`에 둔다.
 기본 실행에서는 이 경로가 있으면 syscall event가 발생할 때마다 reason pipeline을 백그라운드로 실행한다.
 
 입력 event 파일은 dataset session 아래에 저장한다.
