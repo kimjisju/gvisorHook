@@ -19,6 +19,7 @@ class ReasonPipelineConfig:
     output_dir: Path
     log_path: Path
     db_path: Path | None = None
+    max_concurrency: int = 1
 
 
 @dataclass(frozen=True, slots=True)

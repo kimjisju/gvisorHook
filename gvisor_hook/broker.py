@@ -217,6 +217,9 @@ class ApprovalBroker:
         self._event_log_buffer = ""
         self._llm_log_offset = 0
         self._llm_log_buffer = ""
+        self._reason_pipeline_semaphore = (
+            asyncio.Semaphore(reason_pipeline_config.max_concurrency) if reason_pipeline_config is not None else None
+        )
 
     async def start(self) -> None:
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -295,11 +298,19 @@ class ApprovalBroker:
         assert self.reason_pipeline_config is not None
         exchange = self._latest_llm_exchange()
         try:
-            await run_reason_pipeline_event(
-                self.reason_pipeline_config,
-                exchange=exchange,
-                syscall_event=event,
-            )
+            if self._reason_pipeline_semaphore is None:
+                await run_reason_pipeline_event(
+                    self.reason_pipeline_config,
+                    exchange=exchange,
+                    syscall_event=event,
+                )
+                return
+            async with self._reason_pipeline_semaphore:
+                await run_reason_pipeline_event(
+                    self.reason_pipeline_config,
+                    exchange=exchange,
+                    syscall_event=event,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -655,6 +666,7 @@ async def serve(args: argparse.Namespace) -> None:
 def build_reason_pipeline_config(args: argparse.Namespace) -> ReasonPipelineConfig | None:
     if not args.reason_pipeline_dir:
         return None
+    max_concurrency = max(1, int(args.reason_pipeline_max_concurrency))
     pipeline_dir = Path(args.reason_pipeline_dir)
     event_dir = Path(args.reason_pipeline_event_dir) if args.reason_pipeline_event_dir else pipeline_dir / "events"
     output_dir = (
@@ -675,4 +687,5 @@ def build_reason_pipeline_config(args: argparse.Namespace) -> ReasonPipelineConf
         output_dir=output_dir,
         log_path=log_path,
         db_path=db_path,
+        max_concurrency=max_concurrency,
     )

@@ -517,6 +517,7 @@ def spawn_broker(
     reason_pipeline_output_dir: Path | None = None,
     reason_pipeline_log_path: Path | None = None,
     reason_pipeline_db_path: Path | None = None,
+    reason_pipeline_max_concurrency: int = 1,
 ) -> subprocess.Popen[bytes]:
     command = [
         sys.executable,
@@ -566,6 +567,7 @@ def spawn_broker(
         )
         if reason_pipeline_db_path is not None:
             command.extend(["--reason-pipeline-db-path", str(reason_pipeline_db_path)])
+        command.extend(["--reason-pipeline-max-concurrency", str(reason_pipeline_max_concurrency)])
     log_path.parent.mkdir(parents=True, exist_ok=True)
     broker_log = log_path.open("a", encoding="utf-8")
     return subprocess.Popen(
@@ -833,6 +835,7 @@ def launch(args: argparse.Namespace) -> int:
             reason_pipeline_output_dir=reason_pipeline_output_dir,
             reason_pipeline_log_path=reason_pipeline_log_path,
             reason_pipeline_db_path=reason_pipeline_db_path,
+            reason_pipeline_max_concurrency=args.reason_pipeline_max_concurrency,
         )
         wait_for_http_ready(args.web_port, timeout=10)
         resolv_path, hosts_path, nsswitch_path = write_runtime_network_files(runtime_dir)

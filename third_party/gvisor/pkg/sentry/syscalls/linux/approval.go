@@ -113,7 +113,6 @@ var approvalHookedSyscalls = map[string]struct{}{
 	"fsetxattr":          {},
 	"fsync":              {},
 	"ftruncate":          {},
-	"futex":              {},
 	"futimesat":          {},
 	"inotify_add_watch":  {},
 	"inotify_init":       {},

@@ -244,8 +244,6 @@ def main() -> None:
                 "summary": result.syscall_summary,
                 "path": result.syscall_path,
                 "argv": result.syscall_argv,
-                "affects_host_os": result.affects_host_os,
-                "reason": result.reason,
                 "schema_signature": result.schema_signature,
                 "parser_source": result.parser_source,
                 "parser_path": result.parser_path,

@@ -160,6 +160,86 @@ class ApprovalBrokerTests(unittest.IsolatedAsyncioTestCase):
         _, kwargs = run_mock.await_args
         self.assertEqual(kwargs["syscall_event"].id, "evt-reason-1")
 
+    async def test_reason_pipeline_concurrency_is_limited(self) -> None:
+        pipeline_dir = Path(self.tempdir.name) / "third_party" / "reason_pipeline"
+        pipeline_dir.mkdir(parents=True)
+        await self.broker.stop()
+        self.broker = ApprovalBroker(
+            self.socket_path,
+            decision_timeout=0.2,
+            event_log_path=self.event_log_path,
+            decision_dir=self.decision_dir,
+            llm_log_path=self.llm_log_path,
+            reason_pipeline_config=ReasonPipelineConfig(
+                pipeline_dir=pipeline_dir,
+                agent_name="codex",
+                event_dir=Path(self.tempdir.name) / "reason-events",
+                output_dir=Path(self.tempdir.name) / "reason-results",
+                log_path=Path(self.tempdir.name) / "reason.ndjson",
+                db_path=Path(self.tempdir.name) / "reason.db",
+                max_concurrency=1,
+            ),
+        )
+        await self.broker.start()
+
+        started: list[str] = []
+        running = 0
+        max_running = 0
+        release_first = asyncio.Event()
+        release_second = asyncio.Event()
+
+        async def fake_run(*_args, **kwargs) -> None:
+            nonlocal running, max_running
+            event_id = kwargs["syscall_event"].id
+            started.append(event_id)
+            running += 1
+            max_running = max(max_running, running)
+            if event_id == "evt-reason-a":
+                await release_first.wait()
+            else:
+                await release_second.wait()
+            running -= 1
+
+        payload_a = {
+            "id": "evt-reason-a",
+            "container_id": "demo",
+            "pid": 10,
+            "tid": 11,
+            "syscall": "openat",
+            "summary": "open write-intent",
+            "path": "/tmp/a.txt",
+            "argv": None,
+            "started_at": "2026-04-04T00:00:00Z",
+            "status": "pending",
+        }
+        payload_b = {
+            "id": "evt-reason-b",
+            "container_id": "demo",
+            "pid": 10,
+            "tid": 11,
+            "syscall": "openat",
+            "summary": "open write-intent",
+            "path": "/tmp/b.txt",
+            "argv": None,
+            "started_at": "2026-04-04T00:00:00Z",
+            "status": "pending",
+        }
+
+        with mock.patch("gvisor_hook.broker.run_reason_pipeline_event", side_effect=fake_run):
+            self.event_log_path.write_text(
+                json.dumps(payload_a) + "\n" + json.dumps(payload_b) + "\n",
+                encoding="utf-8",
+            )
+            await asyncio.sleep(0.3)
+            self.assertEqual(started, ["evt-reason-a"])
+            self.assertEqual(max_running, 1)
+            release_first.set()
+            await asyncio.sleep(0.3)
+            self.assertEqual(started, ["evt-reason-a", "evt-reason-b"])
+            self.assertEqual(max_running, 1)
+            release_second.set()
+            await asyncio.sleep(0.1)
+
     async def test_llm_log_round_trip(self) -> None:
         payload = {
             "type": "llm-upsert",

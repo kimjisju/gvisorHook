@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .db import PipelineDatabase, SyscallImpact
+from .db import PipelineDatabase
 from .parser_manager import ParserManager
 from .schema import extract_syscall_name, slugify
 
@@ -15,8 +15,6 @@ from .schema import extract_syscall_name, slugify
 class PipelineResult:
     status: str
     syscall_name: str
-    affects_host_os: int
-    reason: str
     syscall_summary: str | None = None
     syscall_path: str | None = None
     syscall_argv: list[str] | None = None
@@ -42,11 +40,10 @@ class SyscallNormalizationPipeline:
     ) -> None:
         resolved_base_dir = base_dir or Path(__file__).resolve().parent.parent
         resolved_db_path = db_path or resolved_base_dir / "data" / "pipeline.db"
-        resolved_mapping_path = mapping_csv_path or resolved_base_dir / "data" / "syscall_host_impact_map.csv"
         resolved_parser_dir = parser_dir or resolved_base_dir / "generated_parsers"
         self.event_output_dir = event_output_dir or resolved_base_dir / "data" / "events"
 
-        self.database = PipelineDatabase(resolved_db_path, resolved_mapping_path)
+        self.database = PipelineDatabase(resolved_db_path, mapping_csv_path)
         self.database.initialize()
         self.parser_manager = ParserManager(self.database, resolved_parser_dir)
 
@@ -59,29 +56,6 @@ class SyscallNormalizationPipeline:
         syscall_payload: Any,
     ) -> PipelineResult:
         syscall_name = extract_syscall_name(syscall_payload)
-        syscall_impact = self.database.lookup_syscall(syscall_name)
-
-        if syscall_impact.affects_host_os == 0:
-            event_id, event_path = self._write_event_json(
-                agent_name=agent_name,
-                syscall_impact=syscall_impact,
-                syscall_payload=syscall_payload,
-                prompt_text="",
-                reasoning_text="",
-            )
-            return PipelineResult(
-                status="skipped",
-                syscall_name=syscall_impact.syscall_name,
-                syscall_summary=self._syscall_summary(syscall_payload),
-                syscall_path=self._syscall_path(syscall_payload),
-                syscall_argv=self._syscall_argv(syscall_payload),
-                affects_host_os=0,
-                reason=self._format_skip_reason(syscall_impact),
-                event_id=event_id,
-                event_path=str(event_path),
-                agent_name=agent_name,
-            )
-
         parser_result = self.parser_manager.resolve(
             agent_name=agent_name,
             request_payload=request_payload,
@@ -94,19 +68,17 @@ class SyscallNormalizationPipeline:
         )
         event_id, event_path = self._write_event_json(
             agent_name=agent_name,
-            syscall_impact=syscall_impact,
+            syscall_name=syscall_name,
             syscall_payload=syscall_payload,
             prompt_text=prompt_text,
             reasoning_text=reasoning_text,
         )
         return PipelineResult(
             status="stored",
-            syscall_name=syscall_impact.syscall_name,
+            syscall_name=syscall_name,
             syscall_summary=self._syscall_summary(syscall_payload),
             syscall_path=self._syscall_path(syscall_payload),
             syscall_argv=self._syscall_argv(syscall_payload),
-            affects_host_os=syscall_impact.affects_host_os,
-            reason=syscall_impact.rationale,
             event_id=event_id,
             event_path=str(event_path),
             agent_name=agent_name,
@@ -121,14 +93,14 @@ class SyscallNormalizationPipeline:
         self,
         *,
         agent_name: str,
-        syscall_impact: SyscallImpact,
+        syscall_name: str,
         syscall_payload: Any,
         prompt_text: str,
         reasoning_text: str,
     ) -> tuple[str, Path]:
         self.event_output_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(timezone.utc).isoformat()
-        event_id = self._event_id(syscall_payload, syscall_impact.syscall_name, timestamp)
+        event_id = self._event_id(syscall_payload, syscall_name, timestamp)
         event_path = self.event_output_dir / f"{event_id}.json"
         counter = 1
         while event_path.exists():
@@ -137,15 +109,10 @@ class SyscallNormalizationPipeline:
         payload = {
             "event_id": event_path.stem,
             "agent_name": agent_name,
-            "syscall": syscall_impact.syscall_name,
+            "syscall": syscall_name,
             "summary": self._syscall_summary(syscall_payload),
             "path": self._syscall_path(syscall_payload),
             "argv": self._syscall_argv(syscall_payload),
-            "affects_host_os": syscall_impact.affects_host_os,
-            "syscall_category": syscall_impact.category,
-            "reason": syscall_impact.rationale,
-            "syscall_mapping_source": syscall_impact.source,
-            "is_known_syscall": syscall_impact.is_known,
             "prompt_text": prompt_text,
             "reasoning_text": reasoning_text,
             "created_at": timestamp,
@@ -226,9 +193,3 @@ class SyscallNormalizationPipeline:
             compact_timestamp = timestamp.replace("+00:00", "Z").replace(":", "").replace(".", "")
             candidate = f"{compact_timestamp}-{syscall_name}"
         return slugify(str(candidate)).replace("_", "-")
-
-    def _format_skip_reason(self, syscall_impact: SyscallImpact) -> str:
-        return (
-            f"syscall '{syscall_impact.syscall_name}' is marked as non-host-impacting "
-            f"({syscall_impact.category}): {syscall_impact.rationale}"
-        )

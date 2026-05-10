@@ -64,6 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable running reason_pipeline for each syscall event.",
     )
     launch_parser.add_argument(
+        "--reason-pipeline-max-concurrency",
+        type=int,
+        default=1,
+        help="Maximum number of concurrent reason_pipeline subprocesses. Default: 1.",
+    )
+    launch_parser.add_argument(
         "--proxy-mode",
         choices=("all", "off"),
         default="all",
@@ -89,6 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--reason-pipeline-output-dir", default=None)
     serve_parser.add_argument("--reason-pipeline-log-path", default=None)
     serve_parser.add_argument("--reason-pipeline-db-path", default=None)
+    serve_parser.add_argument("--reason-pipeline-max-concurrency", type=int, default=1)
 
     replay_parser = subparsers.add_parser(
         "replay-reason-pipeline",

@@ -96,16 +96,9 @@ class ReasonPipelineIntegrationTests(unittest.TestCase):
     def test_pipeline_writes_normalized_event_json(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             temp_path = Path(tempdir)
-            mapping_csv = temp_path / "mapping.csv"
-            mapping_csv.write_text(
-                "syscall_name,affects_host_os,category,rationale\n"
-                "openat,1,file,can affect host-visible files\n",
-                encoding="utf-8",
-            )
             pipeline = SyscallNormalizationPipeline(
                 base_dir=REASON_PIPELINE_DIR,
                 db_path=temp_path / "pipeline-cache.db",
-                mapping_csv_path=mapping_csv,
                 parser_dir=temp_path / "parsers",
                 event_output_dir=temp_path / "events",
             )
@@ -155,12 +148,6 @@ class ReasonPipelineIntegrationTests(unittest.TestCase):
     def test_pipeline_cleans_abrupt_system_prompt_growth(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             temp_path = Path(tempdir)
-            mapping_csv = temp_path / "mapping.csv"
-            mapping_csv.write_text(
-                "syscall_name,affects_host_os,category,rationale\n"
-                "write,1,file,can affect host-visible files\n",
-                encoding="utf-8",
-            )
             output_dir = temp_path / "events"
             output_dir.mkdir()
             (output_dir / "previous.json").write_text(
@@ -170,7 +157,6 @@ class ReasonPipelineIntegrationTests(unittest.TestCase):
             pipeline = SyscallNormalizationPipeline(
                 base_dir=REASON_PIPELINE_DIR,
                 db_path=temp_path / "pipeline-cache.db",
-                mapping_csv_path=mapping_csv,
                 parser_dir=temp_path / "parsers",
                 event_output_dir=output_dir,
             )
@@ -206,16 +192,9 @@ class ReasonPipelineIntegrationTests(unittest.TestCase):
     def test_pipeline_cleans_system_reminder_even_without_previous_result(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             temp_path = Path(tempdir)
-            mapping_csv = temp_path / "mapping.csv"
-            mapping_csv.write_text(
-                "syscall_name,affects_host_os,category,rationale\n"
-                "openat,1,file,can affect host-visible files\n",
-                encoding="utf-8",
-            )
             pipeline = SyscallNormalizationPipeline(
                 base_dir=REASON_PIPELINE_DIR,
                 db_path=temp_path / "pipeline-cache.db",
-                mapping_csv_path=mapping_csv,
                 parser_dir=temp_path / "parsers",
                 event_output_dir=temp_path / "events",
             )
@@ -253,12 +232,6 @@ class ReasonPipelineIntegrationTests(unittest.TestCase):
     def test_pipeline_cleans_local_command_metadata_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             temp_path = Path(tempdir)
-            mapping_csv = temp_path / "mapping.csv"
-            mapping_csv.write_text(
-                "syscall_name,affects_host_os,category,rationale\n"
-                "openat,1,file,can affect host-visible files\n",
-                encoding="utf-8",
-            )
             output_dir = temp_path / "events"
             output_dir.mkdir()
             (output_dir / "previous.json").write_text(
@@ -268,7 +241,6 @@ class ReasonPipelineIntegrationTests(unittest.TestCase):
             pipeline = SyscallNormalizationPipeline(
                 base_dir=REASON_PIPELINE_DIR,
                 db_path=temp_path / "pipeline-cache.db",
-                mapping_csv_path=mapping_csv,
                 parser_dir=temp_path / "parsers",
                 event_output_dir=output_dir,
             )
@@ -308,16 +280,9 @@ class ReasonPipelineIntegrationTests(unittest.TestCase):
     def test_pipeline_normalizes_anthropic_stream_reasoning(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             temp_path = Path(tempdir)
-            mapping_csv = temp_path / "mapping.csv"
-            mapping_csv.write_text(
-                "syscall_name,affects_host_os,category,rationale\n"
-                "execve,1,process,executes a program\n",
-                encoding="utf-8",
-            )
             pipeline = SyscallNormalizationPipeline(
                 base_dir=REASON_PIPELINE_DIR,
                 db_path=temp_path / "pipeline-cache.db",
-                mapping_csv_path=mapping_csv,
                 parser_dir=temp_path / "parsers",
                 event_output_dir=temp_path / "events",
             )
@@ -356,16 +321,9 @@ class ReasonPipelineIntegrationTests(unittest.TestCase):
     def test_pipeline_outputs_syscall_fields_directly(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             temp_path = Path(tempdir)
-            mapping_csv = temp_path / "mapping.csv"
-            mapping_csv.write_text(
-                "syscall_name,affects_host_os,category,rationale\n"
-                "write,1,file,can affect host-visible files\n",
-                encoding="utf-8",
-            )
             pipeline = SyscallNormalizationPipeline(
                 base_dir=REASON_PIPELINE_DIR,
                 db_path=temp_path / "pipeline-cache.db",
-                mapping_csv_path=mapping_csv,
                 parser_dir=temp_path / "parsers",
                 event_output_dir=temp_path / "events",
             )
