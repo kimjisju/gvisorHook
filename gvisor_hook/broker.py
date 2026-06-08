@@ -4,7 +4,9 @@ import argparse
 import asyncio
 import json
 import logging
+import re
 import signal
+import time
 from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import replace
@@ -38,7 +40,7 @@ INDEX_HTML = """<!doctype html>
     .event-head{display:flex;align-items:start;justify-content:space-between;gap:12px;margin-bottom:8px}.syscall,.exchange-kind{font-family:"IBM Plex Mono","Consolas",monospace;font-size:.85rem;color:var(--accent)}.summary,.exchange-summary{font-weight:650;line-height:1.45;word-break:break-word}
     .meta{margin-top:8px;color:var(--muted);font-size:.84rem;line-height:1.5;word-break:break-word}.actions{display:flex;gap:8px;margin-top:12px}
     button{border:0;border-radius:12px;padding:10px 12px;font:inherit;cursor:pointer;transition:transform .08s ease,opacity .12s ease}button:hover{transform:translateY(-1px)}button.allow{background:var(--accent);color:white}button.deny{background:var(--deny);color:white}button:disabled{opacity:.48;cursor:default;transform:none}
-    .status{font-size:.78rem;border-radius:999px;padding:5px 9px;background:rgba(31,42,48,.08);color:var(--ink);white-space:nowrap}.status.allowed,.status.completed{background:rgba(15,118,110,.16);color:#0b5f59}.status.denied,.status.error{background:rgba(185,28,28,.16);color:#991b1b}.status.timeout,.status.pending{background:rgba(245,158,11,.18);color:#92400e}
+    .status{font-size:.78rem;border-radius:999px;padding:5px 9px;background:rgba(31,42,48,.08);color:var(--ink);white-space:nowrap}.status.allowed,.status.completed{background:rgba(15,118,110,.16);color:#0b5f59}.status.denied,.status.error{background:rgba(185,28,28,.16);color:#991b1b}.status.timeout,.status.pending{background:rgba(245,158,11,.18);color:#92400e}.status.guard_checking{background:rgba(59,130,246,.16);color:#1d4ed8}
     .empty{color:var(--muted);padding:14px;border:1px dashed var(--line);border-radius:16px}.connection{color:var(--muted);font-size:.88rem}.keycap{font-family:"IBM Plex Mono",monospace;border:1px solid var(--line);padding:2px 6px;border-radius:8px;background:rgba(255,255,255,.92);margin-left:4px}
     .payload{margin-top:10px;background:#f8fafb;border:1px solid var(--line);border-radius:14px;padding:12px;overflow:auto;max-height:320px;font-family:"IBM Plex Mono","Consolas",monospace;font-size:.78rem;line-height:1.5;white-space:pre-wrap;word-break:break-word}
     .payload-label{margin-top:10px;font-size:.78rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
@@ -213,6 +215,7 @@ class ApprovalBroker:
         self._tcp_server: asyncio.base_events.Server | None = None
         self._lock = asyncio.Lock()
         self._tasks: set[asyncio.Task[None]] = set()
+        self._approval_grants: list[dict[str, Any]] = []
         self._event_log_offset = 0
         self._event_log_buffer = ""
         self._llm_log_offset = 0
@@ -220,6 +223,79 @@ class ApprovalBroker:
         self._reason_pipeline_semaphore = (
             asyncio.Semaphore(reason_pipeline_config.max_concurrency) if reason_pipeline_config is not None else None
         )
+
+    def _extract_workspace_paths(self, event: SyscallEvent) -> set[str]:
+        text_parts = [event.summary or "", event.path or ""]
+        if event.argv:
+            text_parts.extend(str(item) for item in event.argv)
+        text = " ".join(text_parts)
+        paths = set(re.findall(r"/tmp/workspace/[^\s'\";&|<>]+", text))
+        action = self._approval_action(event)
+        if action == "permission_change":
+            paths.update(re.findall(r"(?:chmod|chown)\s+(?:-[A-Za-z0-9]+\s+)?\S+\s+([^\s'\";&|<>]+)", text))
+        elif action == "file_delete":
+            paths.update(re.findall(r"(?:rm|rmdir|unlink)\s+(?:-[A-Za-z0-9]+\s+)?([^\s'\";&|<>]+)", text))
+        if event.path and event.path != "[unknown]":
+            paths.add(event.path)
+        normalized = set()
+        for path in paths:
+            cleaned = path.strip()
+            if not cleaned:
+                continue
+            normalized.add(cleaned)
+            if not cleaned.startswith("/"):
+                normalized.add(f"/tmp/workspace/{cleaned.lstrip('./')}")
+        paths = normalized
+        return paths
+
+    def _approval_action(self, event: SyscallEvent) -> str | None:
+        text_parts = [event.syscall or "", event.summary or "", event.path or ""]
+        if event.argv:
+            text_parts.extend(str(item) for item in event.argv)
+        text = " ".join(text_parts).lower()
+        syscall = (event.syscall or "").lower()
+        if syscall in {"chmod", "fchmod", "fchmodat", "chown", "fchown", "fchownat", "lchown"}:
+            return "permission_change"
+        if re.search(r"(^|[\s'\";&|])(?:/usr/bin/|/bin/)?(?:chmod|chown)\b", text):
+            return "permission_change"
+        if syscall in {"unlink", "unlinkat", "rmdir"}:
+            return "file_delete"
+        if re.search(r"(^|[\s'\";&|])(?:/usr/bin/|/bin/)?(?:rm|rmdir|unlink)\b", text):
+            return "file_delete"
+        return None
+
+    def _remember_user_allow(self, event: SyscallEvent) -> None:
+        action = self._approval_action(event)
+        paths = self._extract_workspace_paths(event)
+        if action is None or not paths:
+            return
+        self._approval_grants.append(
+            {
+                "container_id": event.container_id,
+                "action": action,
+                "paths": paths,
+                "expires_at": time.monotonic() + 20.0,
+            }
+        )
+        self._approval_grants = self._approval_grants[-64:]
+
+    def _has_user_allow_grant(self, event: SyscallEvent) -> bool:
+        action = self._approval_action(event)
+        paths = self._extract_workspace_paths(event)
+        if action is None or not paths:
+            return False
+        now = time.monotonic()
+        self._approval_grants = [
+            grant for grant in self._approval_grants if grant.get("expires_at", 0) > now
+        ]
+        for grant in self._approval_grants:
+            if grant.get("container_id") != event.container_id:
+                continue
+            if grant.get("action") != action:
+                continue
+            if paths & set(grant.get("paths", set())):
+                return True
+        return False
 
     async def start(self) -> None:
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
@@ -294,19 +370,18 @@ class ApprovalBroker:
             return
         self._start_task(self._run_reason_pipeline(event))
 
-    async def _run_reason_pipeline(self, event: SyscallEvent) -> None:
+    async def _run_reason_pipeline(self, event: SyscallEvent) -> dict[str, Any] | None:
         assert self.reason_pipeline_config is not None
         exchange = self._latest_llm_exchange()
         try:
             if self._reason_pipeline_semaphore is None:
-                await run_reason_pipeline_event(
+                return await run_reason_pipeline_event(
                     self.reason_pipeline_config,
                     exchange=exchange,
                     syscall_event=event,
                 )
-                return
             async with self._reason_pipeline_semaphore:
-                await run_reason_pipeline_event(
+                return await run_reason_pipeline_event(
                     self.reason_pipeline_config,
                     exchange=exchange,
                     syscall_event=event,
@@ -315,6 +390,28 @@ class ApprovalBroker:
             raise
         except Exception as exc:
             LOG.exception("Reason pipeline failed for event id=%s: %s", event.id, exc)
+            return None
+
+    async def _guard_decision_for_event(self, event: SyscallEvent) -> tuple[str, str]:
+        if self.reason_pipeline_config is None:
+            return "USER_CONFIRM", "Reason pipeline is not configured."
+
+        record = await self._run_reason_pipeline(event)
+        if not record:
+            return "USER_CONFIRM", "Reason pipeline failed before producing a Guard LLM result."
+
+        payload = record.get("payload", {})
+        guard_decision = payload.get("guard_decision") or {}
+        decision = str(guard_decision.get("decision", "USER_CONFIRM")).upper()
+        if decision == "ALLOW":
+            return "ALLOW", "Guard LLM allowed the syscall."
+        if decision == "USER_CONFIRM":
+            reason = ""
+            intents = guard_decision.get("intents") or []
+            if intents:
+                reason = str(intents[0].get("reason", ""))
+            return "USER_CONFIRM", reason or "Guard LLM requires user confirmation."
+        return "USER_CONFIRM", f"Unknown Guard LLM decision: {decision}"
 
     async def _handle_ipc_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -340,25 +437,45 @@ class ApprovalBroker:
                     event.pid,
                     event.path,
                 )
-                future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
                 async with self._lock:
-                    self._events[event.id] = event
-                    self._pending[event.id] = future
-                    if self._auto_accept:
-                        future.set_result("allow")
-                await self._broadcast(BrokerEnvelope("event-upsert", {"event": event.to_dict()}).to_dict())
-                self._start_reason_pipeline(event)
+                    self._events[event.id] = replace(event, status="guard_checking")
+                    guard_event = self._events[event.id]
+                await self._broadcast(BrokerEnvelope("event-upsert", {"event": guard_event.to_dict()}).to_dict())
+
                 decision = "deny"
                 errno = "EPERM"
-                try:
-                    decision = await asyncio.wait_for(future, timeout=self.decision_timeout)
-                    errno = None if decision == "allow" else "EPERM"
-                except asyncio.TimeoutError:
-                    LOG.warning("Timed out waiting for decision id=%s syscall=%s", event.id, event.syscall)
-                    await self._set_status(event.id, "timeout", errno)
+                if self._has_user_allow_grant(event):
+                    guard_decision = "ALLOW"
+                    guard_reason = "Allowed by recent user confirmation for the same action and target."
                 else:
-                    LOG.info("Decision id=%s syscall=%s decision=%s", event.id, event.syscall, decision)
-                    await self._set_status(event.id, "allowed" if decision == "allow" else "denied", errno)
+                    guard_decision, guard_reason = await self._guard_decision_for_event(event)
+                LOG.info(
+                    "Guard decision id=%s syscall=%s decision=%s reason=%s",
+                    event.id,
+                    event.syscall,
+                    guard_decision,
+                    guard_reason,
+                )
+                if guard_decision == "ALLOW":
+                    decision = "allow"
+                    errno = None
+                    await self._set_status(event.id, "allowed", errno)
+                else:
+                    future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+                    async with self._lock:
+                        self._pending[event.id] = future
+                    await self._set_status(event.id, "pending", None)
+                    try:
+                        decision = await asyncio.wait_for(future, timeout=self.decision_timeout)
+                        errno = None if decision == "allow" else "EPERM"
+                    except asyncio.TimeoutError:
+                        LOG.warning("Timed out waiting for user decision id=%s syscall=%s", event.id, event.syscall)
+                        await self._set_status(event.id, "timeout", errno)
+                    else:
+                        LOG.info("User decision id=%s syscall=%s decision=%s", event.id, event.syscall, decision)
+                        if decision == "allow":
+                            self._remember_user_allow(event)
+                        await self._set_status(event.id, "allowed" if decision == "allow" else "denied", errno)
                 writer.write(
                     json.dumps(
                         {"type": "decision_result", "id": event.id, "decision": decision, "errno": errno}
@@ -429,11 +546,8 @@ class ApprovalBroker:
         async with self._lock:
             if event.id in self._events:
                 return
-            self._events[event.id] = event
-            future = asyncio.get_running_loop().create_future()
-            self._pending[event.id] = future
-            if self._auto_accept:
-                future.set_result("allow")
+            self._events[event.id] = replace(event, status="guard_checking")
+            updated = self._events[event.id]
         LOG.info(
             "Received syscall event id=%s syscall=%s pid=%s path=%s (file backend)",
             event.id,
@@ -441,9 +555,34 @@ class ApprovalBroker:
             event.pid,
             event.path,
         )
-        await self._broadcast(BrokerEnvelope("event-upsert", {"event": event.to_dict()}).to_dict())
-        self._start_reason_pipeline(event)
-        self._start_task(self._await_file_decision(event.id, event.syscall, future))
+        await self._broadcast(BrokerEnvelope("event-upsert", {"event": updated.to_dict()}).to_dict())
+        self._start_task(self._guard_then_await_file_decision(event))
+
+    async def _guard_then_await_file_decision(self, event: SyscallEvent) -> None:
+        decision = "deny"
+        errno = "EPERM"
+        if self._has_user_allow_grant(event):
+            guard_decision = "ALLOW"
+            guard_reason = "Allowed by recent user confirmation for the same action and target."
+        else:
+            guard_decision, guard_reason = await self._guard_decision_for_event(event)
+        LOG.info(
+            "Guard decision id=%s syscall=%s decision=%s reason=%s (file backend)",
+            event.id,
+            event.syscall,
+            guard_decision,
+            guard_reason,
+        )
+        if guard_decision == "ALLOW":
+            await self._write_decision_file(event.id, "allow", None)
+            await self._set_status(event.id, "allowed", None)
+            return
+
+        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        async with self._lock:
+            self._pending[event.id] = future
+        await self._set_status(event.id, "pending", None)
+        await self._await_file_decision(event.id, event.syscall, future)
 
     async def _upsert_llm_exchange(self, exchange: LLMExchange) -> None:
         async with self._lock:
@@ -464,6 +603,10 @@ class ApprovalBroker:
             decision = await asyncio.wait_for(future, timeout=self.decision_timeout)
             errno = None if decision == "allow" else "EPERM"
             status = "allowed" if decision == "allow" else "denied"
+            if decision == "allow":
+                event = self._events.get(event_id)
+                if event is not None:
+                    self._remember_user_allow(event)
         except asyncio.TimeoutError:
             LOG.warning("Timed out waiting for decision id=%s syscall=%s", event_id, syscall)
         except asyncio.CancelledError:
@@ -489,7 +632,8 @@ class ApprovalBroker:
             if event is None:
                 return
             self._events[event_id] = replace(event, status=status, errno=errno)
-            self._pending.pop(event_id, None)
+            if status not in {"pending", "guard_checking"}:
+                self._pending.pop(event_id, None)
             updated = self._events[event_id]
         await self._broadcast(BrokerEnvelope("event-upsert", {"event": updated.to_dict()}).to_dict())
 
@@ -504,10 +648,6 @@ class ApprovalBroker:
     async def set_auto_accept(self, enabled: bool) -> bool:
         async with self._lock:
             self._auto_accept = enabled
-            if enabled:
-                for future in self._pending.values():
-                    if not future.done():
-                        future.set_result("allow")
         await self._broadcast(await self.snapshot())
         return enabled
 

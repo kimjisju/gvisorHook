@@ -1217,6 +1217,9 @@ func Truncate(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintpt
 	if err != nil {
 		return 0, nil, err
 	}
+	if err := approvePathMutation(t, "truncate", path.String()); err != nil {
+		return 0, nil, err
+	}
 
 	err = setstatat(t, linux.AT_FDCWD, path, disallowEmptyPath, followFinalSymlink, &vfs.SetStatOptions{
 		Stat: linux.Statx{
@@ -1246,6 +1249,9 @@ func Ftruncate(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintp
 
 	if !file.IsWritable() {
 		return 0, nil, linuxerr.EINVAL
+	}
+	if err := approveWriteFD(t, "ftruncate", file, 0); err != nil {
+		return 0, nil, err
 	}
 
 	err := file.SetStat(t, vfs.SetStatOptions{
@@ -1305,6 +1311,9 @@ func fchownat(t *kernel.Task, dirfd int32, pathAddr hostarch.Addr, owner, group,
 	if err := populateSetStatOptionsForChown(t, owner, group, &opts); err != nil {
 		return err
 	}
+	if err := approvePathMutation(t, "chown", path.String()); err != nil {
+		return err
+	}
 
 	return setstatat(t, dirfd, path, shouldAllowEmptyPath(flags&linux.AT_EMPTY_PATH != 0), shouldFollowFinalSymlink(flags&linux.AT_SYMLINK_NOFOLLOW == 0), &opts)
 }
@@ -1347,6 +1356,9 @@ func Fchown(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr,
 	if err := populateSetStatOptionsForChown(t, owner, group, &opts); err != nil {
 		return 0, nil, err
 	}
+	if err := approveWriteFD(t, "fchown", file, 0); err != nil {
+		return 0, nil, err
+	}
 	return 0, nil, file.SetStat(t, opts)
 }
 
@@ -1372,6 +1384,9 @@ func fchmodat(t *kernel.Task, dirfd int32, pathAddr hostarch.Addr, mode uint) er
 	if err != nil {
 		return err
 	}
+	if err := approvePathMutation(t, "chmod", path.String()); err != nil {
+		return err
+	}
 
 	return setstatat(t, dirfd, path, disallowEmptyPath, followFinalSymlink, &vfs.SetStatOptions{
 		Stat: linux.Statx{
@@ -1391,6 +1406,9 @@ func Fchmod(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr,
 		return 0, nil, linuxerr.EBADF
 	}
 	defer file.DecRef(t)
+	if err := approveWriteFD(t, "fchmod", file, 0); err != nil {
+		return 0, nil, err
+	}
 
 	return 0, nil, file.SetStat(t, vfs.SetStatOptions{
 		Stat: linux.Statx{

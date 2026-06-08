@@ -31,7 +31,10 @@ from .dataset import (
     record_terminal_chunk,
     utc_now,
 )
-from .reason_pipeline import default_reason_pipeline_dir
+from .reason_pipeline import default_reason_pipeline_dir, model_learning_cap_reason_results_dir
+
+HOOK_WARMUP_MS = int(os.environ.get("GVISOR_HOOK_WARMUP_MS_DEFAULT", "3000"))
+MIN_HOOK_TIMEOUT_MS = 360000
 
 def _apply_winsize(master_fd: int, *, cols: int, rows: int) -> None:
     # TIOCSWINSZ expects (rows, cols, xpixel, ypixel) as unsigned short.
@@ -737,6 +740,8 @@ def launch(args: argparse.Namespace) -> int:
     agent_name = agent_command_name(agent_argv)
     container_id = f"{agent_name}-{int(time.time())}"
     runtime_home_dir = "/tmp/agent-home"
+    hook_timeout_ms = max(int(args.decision_timeout * 1000), MIN_HOOK_TIMEOUT_MS)
+    hook_enable_after_unix_nano = time.time_ns() + (HOOK_WARMUP_MS * 1_000_000)
     dataset_root = resolve_dataset_root(getattr(args, "dataset_root", None))
     plan_mode_enabled = not getattr(args, "no_plan_mode", False)
     custom_instructions = DATASET_PLAN_INSTRUCTIONS if plan_mode_enabled else None
@@ -789,7 +794,7 @@ def launch(args: argparse.Namespace) -> int:
         else:
             reason_pipeline_dir = default_reason_pipeline_dir(Path(__file__).resolve().parent.parent)
     reason_pipeline_event_dir = dataset_session.session_root / "reason-pipeline-events"
-    reason_pipeline_output_dir = dataset_session.session_root / "reason-pipeline-results"
+    reason_pipeline_output_dir = model_learning_cap_reason_results_dir(Path(__file__).resolve().parent.parent)
     reason_pipeline_log_path = dataset_session.session_root / "reason-pipeline.ndjson"
     reason_pipeline_db_path = dataset_session.session_root / "reason-pipeline.db"
     host_ip = discover_host_ip()
@@ -881,8 +886,9 @@ def launch(args: argparse.Namespace) -> int:
             agent_argv=agent_argv,
             extra_mounts=agent_mounts,
             trusted_ca_cert_path=trusted_ca_cert_path,
-            hook_timeout_ms=int(args.decision_timeout * 1000),
-            hook_warmup_ms=20000,
+            hook_timeout_ms=hook_timeout_ms,
+            hook_warmup_ms=HOOK_WARMUP_MS,
+            hook_enable_after_unix_nano=hook_enable_after_unix_nano,
             hook_container_id=container_id,
             profile="default.yaml",
             custom_instructions=custom_instructions,
@@ -904,8 +910,9 @@ def launch(args: argparse.Namespace) -> int:
         env.update(
             {
                 "GVISOR_HOOK_ADDR": f"127.0.0.1:{broker_tcp_port}",
-                "GVISOR_HOOK_TIMEOUT_MS": str(int(args.decision_timeout * 1000)),
-                "GVISOR_HOOK_WARMUP_MS": "20000",
+                "GVISOR_HOOK_TIMEOUT_MS": str(hook_timeout_ms),
+                "GVISOR_HOOK_WARMUP_MS": str(HOOK_WARMUP_MS),
+                "GVISOR_HOOK_ENABLE_AFTER_UNIX_NANO": str(hook_enable_after_unix_nano),
                 "GVISOR_HOOK_CONTAINER_ID": container_id,
             }
         )
@@ -955,6 +962,7 @@ def launch(args: argparse.Namespace) -> int:
         master_fd = console_server.accept_master_fd_until_process_exit(
             timeout=15, child=runsc_proc
         )
+        time.sleep(HOOK_WARMUP_MS / 1000)
         return relay_tty(master_fd, runsc_proc, dataset_session=dataset_session)
     finally:
         if console_server is not None:

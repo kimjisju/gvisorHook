@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 
 Decision = Literal["allow", "deny"]
-EventStatus = Literal["pending", "allowed", "denied", "timeout", "error"]
+EventStatus = Literal["guard_checking", "pending", "allowed", "denied", "timeout", "error"]
 LLMStatus = Literal["pending", "completed", "error"]
 
 

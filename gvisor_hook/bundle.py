@@ -40,6 +40,7 @@ def build_process_env(
     hook_decision_dir: str | None = None,
     hook_timeout_ms: int | None = None,
     hook_warmup_ms: int | None = None,
+    hook_enable_after_unix_nano: int | None = None,
     hook_container_id: str | None = None,
     proxy_bypass_hosts: list[str] | tuple[str, ...] | None = None,
     trusted_ca_cert_path: str | None = None,
@@ -91,6 +92,8 @@ def build_process_env(
         env["GVISOR_HOOK_TIMEOUT_MS"] = str(hook_timeout_ms)
     if hook_warmup_ms is not None:
         env["GVISOR_HOOK_WARMUP_MS"] = str(hook_warmup_ms)
+    if hook_enable_after_unix_nano is not None:
+        env["GVISOR_HOOK_ENABLE_AFTER_UNIX_NANO"] = str(hook_enable_after_unix_nano)
     if hook_container_id:
         env["GVISOR_HOOK_CONTAINER_ID"] = hook_container_id
     for key, value in os.environ.items():
@@ -117,6 +120,7 @@ def write_bundle_config(
     hook_decision_dir: str | None = None,
     hook_timeout_ms: int | None = None,
     hook_warmup_ms: int | None = None,
+    hook_enable_after_unix_nano: int | None = None,
     hook_container_id: str | None = None,
     proxy_bypass_hosts: list[str] | tuple[str, ...] | None = None,
     trusted_ca_cert_path: str | None = None,
@@ -145,6 +149,7 @@ def write_bundle_config(
                 hook_decision_dir=hook_decision_dir,
                 hook_timeout_ms=hook_timeout_ms,
                 hook_warmup_ms=hook_warmup_ms,
+                hook_enable_after_unix_nano=hook_enable_after_unix_nano,
                 hook_container_id=hook_container_id,
                 proxy_bypass_hosts=proxy_bypass_hosts,
                 trusted_ca_cert_path=trusted_ca_cert_path,

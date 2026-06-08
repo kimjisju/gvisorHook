@@ -8,8 +8,10 @@ artifacts/
 open-interpreter/
 third_party/gvisor/.git.backup-local/
 
-venv
-.venv
+venv/
+.venv/
+
+deny_reason/
 
 datasets/
 gooddata/

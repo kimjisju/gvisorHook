@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -37,6 +39,18 @@ def default_reason_pipeline_dir(repo_root: Path) -> Path | None:
     if (candidate / "pipeline.py").is_file():
         return candidate.resolve()
     return None
+
+
+def model_learning_cap_reason_results_dir(repo_root: Path | None = None) -> Path:
+    if repo_root is None:
+        repo_root = Path(__file__).resolve().parent.parent
+    return (repo_root / "model_learning_cap" / "reason-pipeline-results").resolve()
+
+
+def model_learning_cap_dir(repo_root: Path | None = None) -> Path:
+    if repo_root is None:
+        repo_root = Path(__file__).resolve().parent.parent
+    return (repo_root / "model_learning_cap").resolve()
 
 
 def reason_pipeline_python(pipeline_dir: Path) -> Path:
@@ -104,6 +118,101 @@ def write_pipeline_event(
     return event_path
 
 
+async def run_decision_engine_after_pipeline(
+    *,
+    output_dir: Path,
+    event_id: str,
+    reason_pipeline_log_path: Path,
+) -> dict[str, Any]:
+    model_dir = model_learning_cap_dir(repo_root())
+    decision_engine_path = model_dir / "decision_engine.py"
+    output_log_path = model_dir / "result.txt"
+    run_log_path = model_dir / "decision-engine-runs.ndjson"
+    decision_result_path = model_dir / "decision-results" / f"{event_id}.json"
+    result_event_path = output_dir / f"{event_id}.json"
+    command = [sys.executable, str(decision_engine_path)]
+    env = os.environ.copy()
+    env["ARGUS_REASON_PIPELINE_RESULTS"] = str(output_dir)
+    env["ARGUS_REASON_PIPELINE_FILE"] = str(result_event_path)
+    env["ARGUS_DECISION_OUTPUT_LOG"] = str(output_log_path)
+    env["ARGUS_DECISION_RESULT_JSON"] = str(decision_result_path)
+
+    started_at = utc_now()
+    start_record: dict[str, Any] = {
+        "type": "decision-engine-start",
+        "payload": {
+            "event_id": event_id,
+            "result_event_path": str(result_event_path),
+            "results_dir": str(output_dir),
+            "output_log_path": str(output_log_path),
+            "decision_result_path": str(decision_result_path),
+            "command": command,
+            "started_at": started_at,
+        },
+    }
+    append_ndjson(reason_pipeline_log_path, start_record)
+    append_ndjson(run_log_path, start_record)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *command,
+            cwd=str(model_dir),
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        completed_at = utc_now()
+        record = {
+            "type": "decision-engine-error",
+            "payload": {
+                "event_id": event_id,
+                "result_event_path": str(result_event_path),
+                "results_dir": str(output_dir),
+                "output_log_path": str(output_log_path),
+                "decision_result_path": str(decision_result_path),
+                "command": command,
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "error": repr(exc),
+            },
+        }
+        append_ndjson(reason_pipeline_log_path, record)
+        append_ndjson(run_log_path, record)
+        return record
+
+    completed_at = utc_now()
+    guard_decision = {}
+    if decision_result_path.is_file():
+        try:
+            guard_decision = json.loads(decision_result_path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError):
+            guard_decision = {}
+    record: dict[str, Any] = {
+        "type": "decision-engine-complete",
+        "payload": {
+            "event_id": event_id,
+            "result_event_path": str(result_event_path),
+            "results_dir": str(output_dir),
+            "output_log_path": str(output_log_path),
+            "decision_result_path": str(decision_result_path),
+            "command": command,
+            "returncode": proc.returncode,
+            "guard_decision": guard_decision,
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "stdout": stdout.decode("utf-8", errors="replace"),
+            "stderr": stderr.decode("utf-8", errors="replace"),
+        },
+    }
+    append_ndjson(reason_pipeline_log_path, record)
+    append_ndjson(run_log_path, record)
+    return record
+
+
 async def run_reason_pipeline_event(
     config: ReasonPipelineConfig,
     *,
@@ -146,6 +255,14 @@ async def run_reason_pipeline_event(
         },
     }
     append_ndjson(config.log_path, record)
+    if proc.returncode == 0:
+        decision_record = await run_decision_engine_after_pipeline(
+            output_dir=config.output_dir,
+            event_id=event_path.stem,
+            reason_pipeline_log_path=config.log_path,
+        )
+        record["payload"]["guard_decision"] = decision_record.get("payload", {}).get("guard_decision", {})
+        record["payload"]["decision_engine_returncode"] = decision_record.get("payload", {}).get("returncode")
     return record
 
 
@@ -175,17 +292,18 @@ async def replay_reason_pipeline_session(
     resolved_pipeline_dir = resolved_pipeline_dir.expanduser().resolve()
 
     event_dir = session_root / "reason-pipeline-events"
-    output_dir = session_root / "reason-pipeline-results"
+    output_dir = model_learning_cap_reason_results_dir(repo_root())
     log_path = session_root / "reason-pipeline-replay.ndjson"
     db_path = session_root / "reason-pipeline.db"
     if not event_dir.is_dir():
         raise FileNotFoundError(f"reason pipeline event directory not found: {event_dir}")
-    if clear_results and output_dir.exists():
-        for result_path in output_dir.glob("*.json"):
-            result_path.unlink()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     event_paths = sorted(event_dir.glob("*.json"), key=reason_pipeline_event_sort_key)
+    if clear_results:
+        for event_path in event_paths:
+            with suppress(FileNotFoundError):
+                (output_dir / f"{event_path.stem}.json").unlink()
     success_count = 0
     failure_count = 0
     for event_path in event_paths:
@@ -265,4 +383,12 @@ async def run_reason_pipeline_event_file(
         },
     }
     append_ndjson(log_path, record)
+    if proc.returncode == 0:
+        decision_record = await run_decision_engine_after_pipeline(
+            output_dir=output_dir,
+            event_id=event_id,
+            reason_pipeline_log_path=log_path,
+        )
+        record["payload"]["guard_decision"] = decision_record.get("payload", {}).get("guard_decision", {})
+        record["payload"]["decision_engine_returncode"] = decision_record.get("payload", {}).get("returncode")
     return record
