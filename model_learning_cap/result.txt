@@ -1,0 +1,56 @@
+model output saved to : /home/kimjisu/workspace/gvisorHook/model_learning_cap/result.txt
+
+====================================
+ARGUS INTENT ANALYSIS
+====================================
+Detected intents : 1
+
+
+==================================================
+INTENT 1
+==================================================
+
+[AI AGENT]
+agent name : claude
+
+[MAIN USER INTENT]
+Wasted call — file unchanged since your last Read. Refer to that earlier tool_result instead.
+
+--------------------------------------------------
+[FOLLOW-UP USER INPUTS]
+No follow-up input.
+
+--------------------------------------------------
+[AI AGENT REASONING]
+Bash: {"command": "printf 'exists=%s\\n' \"$(test -e /tmp/workspace/temp.txt && echo yes || echo no)\" > /tmp/workspace/_check2.txt", "description": "Write clearer existence check", "run_in_background": true}
+
+--------------------------------------------------
+[ACTION SUMMARY]
+unknown_sensitive         : 1
+
+--------------------------------------------------
+[NORMALIZED ACTION FLOW]
+
+[ACTION #1]
+agent name        : claude
+event id          : claude-1780944788-9
+created at        : 2026-06-08T19:30:19.942508+00:00
+syscall           : write
+path              : /tmp/workspace/_check2.txt
+argv              : 
+raw summary       : write 10 bytes
+summary           : write 10 bytes
+meaning           : 분류되지 않은 실행 동작
+normalized action : unknown_sensitive
+target class      : no_explicit_target
+rule result       : review
+
+--------------------------------------------------
+[RULE BASE RESULT]
+REVIEW_REQUIRED
+Reason : Review-required semantic actions detected.
+Review actions:
+- unknown_sensitive (no_explicit_target) : write 10 bytes
+
+--------------------------------------------------
+[GUARD LLM]
