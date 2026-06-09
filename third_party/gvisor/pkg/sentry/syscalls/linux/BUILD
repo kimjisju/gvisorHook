@@ -71,10 +71,12 @@ go_library(
     deps = [
         "//pkg/abi",
         "//pkg/abi/linux",
+        "//pkg/abi/linux/errno",
         "//pkg/atomicbitops",
         "//pkg/bits",
         "//pkg/bpf",
         "//pkg/context",
+        "//pkg/errors",
         "//pkg/errors/linuxerr",
         "//pkg/fspath",
         "//pkg/gohacks",

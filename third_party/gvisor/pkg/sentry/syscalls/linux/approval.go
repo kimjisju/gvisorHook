@@ -15,6 +15,8 @@ import (
 	"time"
 
 	abiLinux "gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/abi/linux/errno"
+	gerrors "gvisor.dev/gvisor/pkg/errors"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/log"
@@ -60,6 +62,8 @@ type decisionResult struct {
 	ID       string `json:"id"`
 	Decision string `json:"decision"`
 	Errno    string `json:"errno"`
+	Reason   string `json:"reason"`
+	Message  string `json:"message"`
 }
 
 var (
@@ -584,6 +588,25 @@ func requestApproval(t *kernel.Task, syscallName, summary, path string, argv []s
 	return linuxerr.EPERM
 }
 
+func deniedApprovalError(syscallName string, event approvalEvent, result decisionResult) error {
+	message := strings.TrimSpace(result.Message)
+	if message == "" {
+		message = strings.TrimSpace(result.Reason)
+	}
+	if message == "" {
+		message = "ARGUS denied syscall without a supplied reason."
+	}
+	log.Infof(
+		"gvisor-hook: denied syscall=%s id=%s errno=%s reason=%q message=%q",
+		syscallName,
+		event.ID,
+		result.Errno,
+		result.Reason,
+		message,
+	)
+	return gerrors.New(errno.EPERM, message)
+}
+
 func requestApprovalViaDonatedStream(cfg approvalConfig, syscallName string, event approvalEvent) error {
 	approvalTransportMu.Lock()
 	defer approvalTransportMu.Unlock()
@@ -606,8 +629,7 @@ func requestApprovalViaDonatedStream(cfg approvalConfig, syscallName string, eve
 		return linuxerr.EPERM
 	}
 	if result.Decision != "allow" {
-		log.Infof("gvisor-hook: denied syscall=%s id=%s errno=%s", syscallName, event.ID, result.Errno)
-		return linuxerr.EPERM
+		return deniedApprovalError(syscallName, event, result)
 	}
 	log.Infof("gvisor-hook: allowed syscall=%s id=%s path=%q", syscallName, event.ID, event.Path)
 	return nil
@@ -640,8 +662,7 @@ func requestApprovalViaFiles(cfg approvalConfig, syscallName string, event appro
 				return linuxerr.EPERM
 			}
 			if result.Decision != "allow" {
-				log.Infof("gvisor-hook: denied syscall=%s id=%s errno=%s", syscallName, event.ID, result.Errno)
-				return linuxerr.EPERM
+				return deniedApprovalError(syscallName, event, result)
 			}
 			log.Infof("gvisor-hook: allowed syscall=%s id=%s path=%q", syscallName, event.ID, event.Path)
 			return nil
@@ -683,8 +704,7 @@ func requestApprovalViaSocket(cfg approvalConfig, syscallName string, event appr
 		return linuxerr.EPERM
 	}
 	if result.Decision != "allow" {
-		log.Infof("gvisor-hook: denied syscall=%s id=%s errno=%s", syscallName, event.ID, result.Errno)
-		return linuxerr.EPERM
+		return deniedApprovalError(syscallName, event, result)
 	}
 	log.Infof("gvisor-hook: allowed syscall=%s id=%s path=%q", syscallName, event.ID, event.Path)
 	return nil

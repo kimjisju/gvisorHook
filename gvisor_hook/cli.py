@@ -89,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--event-log-path", default=None)
     serve_parser.add_argument("--decision-dir", default=None)
     serve_parser.add_argument("--llm-log-path", default=None)
+    serve_parser.add_argument("--db-path", default=None)
     serve_parser.add_argument("--reason-pipeline-dir", default=None)
     serve_parser.add_argument("--reason-pipeline-agent-name", default="agent")
     serve_parser.add_argument("--reason-pipeline-event-dir", default=None)

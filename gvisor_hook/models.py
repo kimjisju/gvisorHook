@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 Decision = Literal["allow", "deny"]
 EventStatus = Literal["guard_checking", "pending", "allowed", "denied", "timeout", "error"]
+RiskLevel = Literal["normal", "ambiguous", "harmful"]
 LLMStatus = Literal["pending", "completed", "error"]
 
 
@@ -27,6 +28,10 @@ class SyscallEvent:
     started_at: str = field(default_factory=utc_now)
     status: EventStatus = "pending"
     errno: str | None = None
+    guard_decision: str | None = None
+    guard_reason: str | None = None
+    risk_level: RiskLevel | None = None
+    agent_message: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

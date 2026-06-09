@@ -15,7 +15,8 @@ from typing import Any
 
 from aiohttp import web
 
-from .models import BrokerEnvelope, LLMExchange, SyscallEvent
+from .app_db import AppDatabase
+from .models import BrokerEnvelope, LLMExchange, RiskLevel, SyscallEvent
 from .reason_pipeline import ReasonPipelineConfig, run_reason_pipeline_event
 
 LOG = logging.getLogger(__name__)
@@ -183,6 +184,10 @@ INDEX_HTML = """<!doctype html>
   </script>
 </body>
 </html>"""
+
+WEB_ROOT = Path(__file__).with_name("web")
+UI_DIST_PATH = WEB_ROOT / "dist"
+INDEX_HTML_PATH = WEB_ROOT / "index.html"
 
 
 class ApprovalBroker:
@@ -392,26 +397,69 @@ class ApprovalBroker:
             LOG.exception("Reason pipeline failed for event id=%s: %s", event.id, exc)
             return None
 
-    async def _guard_decision_for_event(self, event: SyscallEvent) -> tuple[str, str]:
+    def _risk_level_from_guard_decision(self, guard_decision: dict[str, Any], decision: str) -> RiskLevel:
+        labels: list[str] = []
+        label = guard_decision.get("label")
+        if label:
+            labels.append(str(label))
+        for intent in guard_decision.get("intents") or []:
+            intent_label = intent.get("label")
+            if intent_label:
+                labels.append(str(intent_label))
+
+        normalized = {item.lower().strip() for item in labels}
+        if "harmful" in normalized:
+            return "harmful"
+        if "ambiguous" in normalized or "unknown" in normalized:
+            return "ambiguous"
+        if decision == "USER_CONFIRM":
+            return "harmful"
+        return "normal"
+
+    def _guard_reason_from_decision(self, guard_decision: dict[str, Any], fallback: str) -> str:
+        reasons: list[str] = []
+        reason = guard_decision.get("reason") or guard_decision.get("decision_reason")
+        if reason:
+            reasons.append(str(reason))
+        for intent in guard_decision.get("intents") or []:
+            intent_reason = intent.get("reason") or intent.get("decision_reason")
+            if intent_reason:
+                reasons.append(str(intent_reason))
+        for reason in reasons:
+            cleaned = reason.strip()
+            if cleaned:
+                return cleaned
+        return fallback
+
+    def _agent_denial_message(self, event: SyscallEvent, guard_reason: str | None) -> str:
+        reason = (guard_reason or "The syscall was denied by the user after Guard review.").strip()
+        target = event.path or "unknown target"
+        return (
+            f"ARGUS denied syscall '{event.syscall}' for target '{target}'. "
+            f"Risk reason: {reason}"
+        )
+
+    async def _guard_decision_for_event(self, event: SyscallEvent) -> tuple[str, str, RiskLevel]:
         if self.reason_pipeline_config is None:
-            return "USER_CONFIRM", "Reason pipeline is not configured."
+            return "USER_CONFIRM", "Reason pipeline is not configured.", "ambiguous"
 
         record = await self._run_reason_pipeline(event)
         if not record:
-            return "USER_CONFIRM", "Reason pipeline failed before producing a Guard LLM result."
+            return "USER_CONFIRM", "Reason pipeline failed before producing a Guard LLM result.", "ambiguous"
 
         payload = record.get("payload", {})
         guard_decision = payload.get("guard_decision") or {}
         decision = str(guard_decision.get("decision", "USER_CONFIRM")).upper()
+        risk_level = self._risk_level_from_guard_decision(guard_decision, decision)
         if decision == "ALLOW":
-            return "ALLOW", "Guard LLM allowed the syscall."
+            return "ALLOW", self._guard_reason_from_decision(guard_decision, "Guard LLM allowed the syscall."), risk_level
         if decision == "USER_CONFIRM":
-            reason = ""
-            intents = guard_decision.get("intents") or []
-            if intents:
-                reason = str(intents[0].get("reason", ""))
-            return "USER_CONFIRM", reason or "Guard LLM requires user confirmation."
-        return "USER_CONFIRM", f"Unknown Guard LLM decision: {decision}"
+            reason = self._guard_reason_from_decision(
+                guard_decision,
+                "Guard LLM requires user confirmation.",
+            )
+            return "USER_CONFIRM", reason, risk_level
+        return "USER_CONFIRM", f"Unknown Guard LLM decision: {decision}", "ambiguous"
 
     async def _handle_ipc_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -437,18 +485,15 @@ class ApprovalBroker:
                     event.pid,
                     event.path,
                 )
-                async with self._lock:
-                    self._events[event.id] = replace(event, status="guard_checking")
-                    guard_event = self._events[event.id]
-                await self._broadcast(BrokerEnvelope("event-upsert", {"event": guard_event.to_dict()}).to_dict())
-
                 decision = "deny"
                 errno = "EPERM"
+                agent_message = None
                 if self._has_user_allow_grant(event):
                     guard_decision = "ALLOW"
                     guard_reason = "Allowed by recent user confirmation for the same action and target."
+                    risk_level: RiskLevel = "normal"
                 else:
-                    guard_decision, guard_reason = await self._guard_decision_for_event(event)
+                    guard_decision, guard_reason, risk_level = await self._guard_decision_for_event(event)
                 LOG.info(
                     "Guard decision id=%s syscall=%s decision=%s reason=%s",
                     event.id,
@@ -459,26 +504,63 @@ class ApprovalBroker:
                 if guard_decision == "ALLOW":
                     decision = "allow"
                     errno = None
-                    await self._set_status(event.id, "allowed", errno)
+                    async with self._lock:
+                        self._events[event.id] = replace(
+                            event,
+                            status="allowed",
+                            errno=errno,
+                            guard_decision=guard_decision,
+                            guard_reason=guard_reason,
+                            risk_level=risk_level,
+                        )
+                        allowed_event = self._events[event.id]
+                    await self._broadcast(BrokerEnvelope("event-upsert", {"event": allowed_event.to_dict()}).to_dict())
                 else:
                     future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
                     async with self._lock:
+                        self._events[event.id] = replace(
+                            event,
+                            status="pending",
+                            errno=None,
+                            guard_decision=guard_decision,
+                            guard_reason=guard_reason,
+                            risk_level=risk_level,
+                        )
                         self._pending[event.id] = future
-                    await self._set_status(event.id, "pending", None)
+                        pending_event = self._events[event.id]
+                    await self._broadcast(BrokerEnvelope("event-upsert", {"event": pending_event.to_dict()}).to_dict())
                     try:
                         decision = await asyncio.wait_for(future, timeout=self.decision_timeout)
                         errno = None if decision == "allow" else "EPERM"
+                        agent_message = None if decision == "allow" else self._agent_denial_message(event, guard_reason)
                     except asyncio.TimeoutError:
                         LOG.warning("Timed out waiting for user decision id=%s syscall=%s", event.id, event.syscall)
-                        await self._set_status(event.id, "timeout", errno)
+                        agent_message = self._agent_denial_message(
+                            event,
+                            f"User approval timed out. Original risk reason: {guard_reason}",
+                        )
+                        await self._set_status(event.id, "timeout", errno, agent_message=agent_message)
                     else:
                         LOG.info("User decision id=%s syscall=%s decision=%s", event.id, event.syscall, decision)
                         if decision == "allow":
                             self._remember_user_allow(event)
-                        await self._set_status(event.id, "allowed" if decision == "allow" else "denied", errno)
+                        await self._set_status(
+                            event.id,
+                            "allowed" if decision == "allow" else "denied",
+                            errno,
+                            agent_message=agent_message,
+                        )
                 writer.write(
                     json.dumps(
-                        {"type": "decision_result", "id": event.id, "decision": decision, "errno": errno}
+                        {
+                            "type": "decision_result",
+                            "id": event.id,
+                            "decision": decision,
+                            "errno": errno,
+                            "reason": guard_reason if decision == "deny" else None,
+                            "message": agent_message,
+                        },
+                        ensure_ascii=False,
                     ).encode()
                     + b"\n"
                 )
@@ -555,17 +637,18 @@ class ApprovalBroker:
             event.pid,
             event.path,
         )
-        await self._broadcast(BrokerEnvelope("event-upsert", {"event": updated.to_dict()}).to_dict())
         self._start_task(self._guard_then_await_file_decision(event))
 
     async def _guard_then_await_file_decision(self, event: SyscallEvent) -> None:
         decision = "deny"
         errno = "EPERM"
+        agent_message = None
         if self._has_user_allow_grant(event):
             guard_decision = "ALLOW"
             guard_reason = "Allowed by recent user confirmation for the same action and target."
+            risk_level: RiskLevel = "normal"
         else:
-            guard_decision, guard_reason = await self._guard_decision_for_event(event)
+            guard_decision, guard_reason, risk_level = await self._guard_decision_for_event(event)
         LOG.info(
             "Guard decision id=%s syscall=%s decision=%s reason=%s (file backend)",
             event.id,
@@ -574,15 +657,31 @@ class ApprovalBroker:
             guard_reason,
         )
         if guard_decision == "ALLOW":
-            await self._write_decision_file(event.id, "allow", None)
-            await self._set_status(event.id, "allowed", None)
+            await self._write_decision_file(event.id, "allow", None, None, None)
+            await self._set_status(
+                event.id,
+                "allowed",
+                None,
+                guard_decision=guard_decision,
+                guard_reason=guard_reason,
+                risk_level=risk_level,
+            )
             return
 
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         async with self._lock:
+            self._events[event.id] = replace(
+                event,
+                status="pending",
+                errno=None,
+                guard_decision=guard_decision,
+                guard_reason=guard_reason,
+                risk_level=risk_level,
+            )
             self._pending[event.id] = future
-        await self._set_status(event.id, "pending", None)
-        await self._await_file_decision(event.id, event.syscall, future)
+            pending_event = self._events[event.id]
+        await self._broadcast(BrokerEnvelope("event-upsert", {"event": pending_event.to_dict()}).to_dict())
+        await self._await_file_decision(event.id, event.syscall, future, guard_reason)
 
     async def _upsert_llm_exchange(self, exchange: LLMExchange) -> None:
         async with self._lock:
@@ -595,26 +694,43 @@ class ApprovalBroker:
         event_id: str,
         syscall: str,
         future: asyncio.Future[str],
+        guard_reason: str,
     ) -> None:
         decision = "deny"
         errno = "EPERM"
         status = "timeout"
+        agent_message = None
         try:
             decision = await asyncio.wait_for(future, timeout=self.decision_timeout)
             errno = None if decision == "allow" else "EPERM"
             status = "allowed" if decision == "allow" else "denied"
+            event = self._events.get(event_id)
+            if decision == "deny" and event is not None:
+                agent_message = self._agent_denial_message(event, guard_reason)
             if decision == "allow":
-                event = self._events.get(event_id)
                 if event is not None:
                     self._remember_user_allow(event)
         except asyncio.TimeoutError:
             LOG.warning("Timed out waiting for decision id=%s syscall=%s", event_id, syscall)
+            event = self._events.get(event_id)
+            if event is not None:
+                agent_message = self._agent_denial_message(
+                    event,
+                    f"User approval timed out. Original risk reason: {guard_reason}",
+                )
         except asyncio.CancelledError:
             raise
-        await self._write_decision_file(event_id, decision, errno)
-        await self._set_status(event_id, status, errno)
+        await self._write_decision_file(event_id, decision, errno, guard_reason if decision == "deny" else None, agent_message)
+        await self._set_status(event_id, status, errno, agent_message=agent_message)
 
-    async def _write_decision_file(self, event_id: str, decision: str, errno: str | None) -> None:
+    async def _write_decision_file(
+        self,
+        event_id: str,
+        decision: str,
+        errno: str | None,
+        reason: str | None,
+        message: str | None,
+    ) -> None:
         if self.decision_dir is None:
             return
         payload = {
@@ -622,16 +738,36 @@ class ApprovalBroker:
             "id": event_id,
             "decision": decision,
             "errno": errno,
+            "reason": reason,
+            "message": message,
         }
         decision_path = self.decision_dir / f"{event_id}.json"
-        decision_path.write_text(json.dumps(payload), encoding="utf-8")
+        decision_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
-    async def _set_status(self, event_id: str, status: str, errno: str | None) -> None:
+    async def _set_status(
+        self,
+        event_id: str,
+        status: str,
+        errno: str | None,
+        *,
+        guard_decision: str | None = None,
+        guard_reason: str | None = None,
+        risk_level: RiskLevel | None = None,
+        agent_message: str | None = None,
+    ) -> None:
         async with self._lock:
             event = self._events.get(event_id)
             if event is None:
                 return
-            self._events[event_id] = replace(event, status=status, errno=errno)
+            self._events[event_id] = replace(
+                event,
+                status=status,
+                errno=errno,
+                guard_decision=guard_decision if guard_decision is not None else event.guard_decision,
+                guard_reason=guard_reason if guard_reason is not None else event.guard_reason,
+                risk_level=risk_level if risk_level is not None else event.risk_level,
+                agent_message=agent_message if agent_message is not None else event.agent_message,
+            )
             if status not in {"pending", "guard_checking"}:
                 self._pending.pop(event_id, None)
             updated = self._events[event_id]
@@ -653,7 +789,11 @@ class ApprovalBroker:
 
     async def snapshot(self) -> dict[str, Any]:
         async with self._lock:
-            events = [event.to_dict() for event in self._events.values()]
+            events = [
+                event.to_dict()
+                for event in self._events.values()
+                if event.status != "guard_checking"
+            ]
             llm_exchanges = [exchange.to_dict() for exchange in self._llm_exchanges.values()]
             auto_accept = self._auto_accept
         return BrokerEnvelope(
@@ -674,8 +814,31 @@ class ApprovalBroker:
 
 def _install_routes(app: web.Application) -> None:
     broker: ApprovalBroker = app["broker"]
+    db: AppDatabase = app["db"]
+    guard_run_streams: set[web.StreamResponse] = set()
+
+    async def broadcast_guard_run(payload: dict[str, Any]) -> None:
+        message = f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+        stale: list[web.StreamResponse] = []
+        for response in guard_run_streams:
+            try:
+                await response.write(message)
+            except Exception:
+                stale.append(response)
+        for response in stale:
+            guard_run_streams.discard(response)
 
     async def index(_: web.Request) -> web.Response:
+        with suppress(FileNotFoundError):
+            return web.Response(
+                text=(UI_DIST_PATH / "index.html").read_text(encoding="utf-8"),
+                content_type="text/html",
+            )
+        with suppress(FileNotFoundError):
+            return web.Response(
+                text=INDEX_HTML_PATH.read_text(encoding="utf-8"),
+                content_type="text/html",
+            )
         return web.Response(text=INDEX_HTML, content_type="text/html")
 
     async def health(_: web.Request) -> web.Response:
@@ -715,9 +878,141 @@ def _install_routes(app: web.Application) -> None:
         await broker.set_auto_accept(enabled)
         return web.json_response({"ok": True, "auto_accept": enabled})
 
+    async def signup_handler(request: web.Request) -> web.Response:
+        payload = await request.json()
+        name = str(payload.get("name") or "").strip()
+        email = str(payload.get("email") or "").strip().lower()
+        password = str(payload.get("password") or "")
+        if not name or not email or not password:
+            raise web.HTTPBadRequest(text="이름, 이메일, 비밀번호를 모두 입력해주세요.")
+        try:
+            user = db.signup(name=name, email=email, password=password)
+        except ValueError as exc:
+            raise web.HTTPConflict(text=str(exc)) from exc
+        verify_url = str(request.url.with_path("/verify-email").with_query({"token": user["verification_token"]}))
+        return web.json_response(
+            {
+                "message": "회원가입 성공. 이메일 인증을 진행해주세요.",
+                "verify_url": verify_url,
+            },
+            status=201,
+        )
+
+    async def verify_email_handler(request: web.Request) -> web.Response:
+        token = request.query.get("token")
+        if not token:
+            raise web.HTTPBadRequest(text="인증 토큰이 없습니다.")
+        user = db.verify_email(token)
+        if user is None:
+            raise web.HTTPBadRequest(text="인증 링크가 유효하지 않거나 만료되었습니다.")
+        return web.Response(
+            text="""
+            <h2>이메일 인증 완료</h2>
+            <p>이제 로그인할 수 있습니다.</p>
+            <a href="/">로그인하러 가기</a>
+            """,
+            content_type="text/html",
+        )
+
+    async def login_handler(request: web.Request) -> web.Response:
+        payload = await request.json()
+        email = str(payload.get("email") or "").strip().lower()
+        password = str(payload.get("password") or "")
+        if not email or not password:
+            raise web.HTTPBadRequest(text="이메일과 비밀번호를 입력해주세요.")
+        try:
+            result = db.login(email=email, password=password)
+        except PermissionError as exc:
+            raise web.HTTPUnauthorized(text=str(exc)) from exc
+        except RuntimeError as exc:
+            raise web.HTTPForbidden(text=str(exc)) from exc
+        return web.json_response({"message": "로그인 성공", **result})
+
+    async def create_guard_run_handler(request: web.Request) -> web.Response:
+        payload = await request.json()
+        if not payload.get("agent_name") or not payload.get("user_prompt") or not payload.get("final_decision"):
+            raise web.HTTPBadRequest(text="agent_name, user_prompt, final_decision은 필수입니다.")
+        try:
+            result = db.create_guard_run(payload)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+        await broadcast_guard_run(
+            {"type": "guard-run-created", "run": result["run"], "actions": result["actions"]}
+        )
+        return web.json_response({"message": "guard run 저장 성공", **result}, status=201)
+
+    async def list_guard_runs_handler(_: web.Request) -> web.Response:
+        return web.json_response(db.list_guard_runs())
+
+    async def guard_runs_stream_handler(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
+        await response.prepare(request)
+        await response.write(b'data: {"type":"connected"}\n\n')
+        guard_run_streams.add(response)
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            guard_run_streams.discard(response)
+        return response
+
+    async def get_guard_run_handler(request: web.Request) -> web.Response:
+        try:
+            run_id = int(request.match_info["id"])
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text="invalid guard run id") from exc
+        result = db.get_guard_run(run_id)
+        if result is None:
+            raise web.HTTPNotFound(text="guard run을 찾을 수 없습니다.")
+        return web.json_response(result)
+
+    async def update_guard_run_approval_handler(request: web.Request) -> web.Response:
+        try:
+            run_id = int(request.match_info["id"])
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text="invalid guard run id") from exc
+        payload = await request.json()
+        approval_status = str(payload.get("approval_status") or "")
+        if approval_status not in {"pending", "approved", "rejected"}:
+            raise web.HTTPBadRequest(text="approval_status는 pending, approved, rejected 중 하나여야 합니다.")
+        approved_by = payload.get("approved_by")
+        if approved_by is not None:
+            try:
+                approved_by = int(approved_by)
+            except (TypeError, ValueError) as exc:
+                raise web.HTTPBadRequest(text="approved_by must be an integer") from exc
+        run = db.update_guard_run_approval(run_id, approval_status=approval_status, approved_by=approved_by)
+        if run is None:
+            raise web.HTTPNotFound(text="guard run을 찾을 수 없습니다.")
+        await broadcast_guard_run({"type": "guard-run-updated", "run": run})
+        return web.json_response({"message": "approval 상태 변경 성공", "run": run})
+
+    async def logs_handler(_: web.Request) -> web.Response:
+        snapshot = await broker.snapshot()
+        return web.json_response(snapshot["payload"]["events"])
+
+    if (UI_DIST_PATH / "assets").is_dir():
+        app.router.add_static("/assets/", path=UI_DIST_PATH / "assets", name="ui-assets")
     app.router.add_get("/", index)
     app.router.add_get("/api/health", health)
     app.router.add_get("/api/events", events_handler)
+    app.router.add_get("/logs", logs_handler)
+    app.router.add_post("/signup", signup_handler)
+    app.router.add_get("/verify-email", verify_email_handler)
+    app.router.add_post("/login", login_handler)
+    app.router.add_post("/guard-runs", create_guard_run_handler)
+    app.router.add_get("/guard-runs", list_guard_runs_handler)
+    app.router.add_get("/guard-runs/stream", guard_runs_stream_handler)
+    app.router.add_get("/guard-runs/{id}", get_guard_run_handler)
+    app.router.add_patch("/guard-runs/{id}/approval", update_guard_run_approval_handler)
     app.router.add_get("/ws", websocket_handler)
     app.router.add_post("/api/events/{event_id}/decision", decide_handler)
     app.router.add_post("/api/auto-accept", auto_accept_handler)
@@ -727,6 +1022,7 @@ async def create_app(
     socket_path: Path,
     decision_timeout: float,
     *,
+    db_path: Path,
     tcp_host: str | None = None,
     tcp_port: int | None = None,
     event_log_path: Path | None = None,
@@ -734,6 +1030,7 @@ async def create_app(
     llm_log_path: Path | None = None,
     reason_pipeline_config: ReasonPipelineConfig | None = None,
 ) -> web.Application:
+    db = AppDatabase(db_path)
     broker = ApprovalBroker(
         socket_path=socket_path,
         decision_timeout=decision_timeout,
@@ -747,9 +1044,11 @@ async def create_app(
     await broker.start()
     app = web.Application()
     app["broker"] = broker
+    app["db"] = db
 
     async def on_cleanup(_: web.Application) -> None:
         await broker.stop()
+        db.close()
 
     app.on_cleanup.append(on_cleanup)
     _install_routes(app)
@@ -761,6 +1060,7 @@ async def serve(args: argparse.Namespace) -> None:
     app = await create_app(
         socket_path=Path(args.socket_path),
         decision_timeout=args.decision_timeout,
+        db_path=Path(args.db_path) if args.db_path else Path(args.socket_path).with_name("datebase.sqlite3"),
         tcp_host=args.tcp_host,
         tcp_port=args.tcp_port,
         event_log_path=Path(args.event_log_path) if args.event_log_path else None,
