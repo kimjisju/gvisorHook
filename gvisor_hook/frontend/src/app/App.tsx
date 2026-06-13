@@ -35,10 +35,51 @@ interface SnapshotPayload {
   auto_accept: boolean;
 }
 
+interface AuthUser {
+  id: number;
+  name: string;
+  email: string;
+}
+
+interface GuardActionRecord {
+  id: number;
+  agent_name?: string | null;
+  event_id?: string | null;
+  created_at?: string | null;
+  syscall?: string | null;
+  path?: string | null;
+  argv?: string | null;
+  raw_summary?: string | null;
+  summary?: string | null;
+  meaning?: string | null;
+  normalized_action?: string | null;
+  target_class?: string | null;
+  rule_result?: string | null;
+}
+
+interface GuardRunRecord {
+  id: number;
+  user_id?: number | null;
+  agent_name?: string | null;
+  user_prompt?: string | null;
+  ai_agent_reasoning?: string | null;
+  rule_base_result?: string | null;
+  rule_base_reason?: string | null;
+  guard_llm_result?: string | null;
+  guard_llm_reason?: string | null;
+  final_decision?: string | null;
+  approval_status?: string | null;
+  approved_at?: string | null;
+  created_at?: string | null;
+  actions?: GuardActionRecord[];
+}
+
 type BrokerEnvelope =
   | { type: "snapshot"; payload: SnapshotPayload }
   | { type: "event-upsert"; payload: { event: SyscallEvent } }
   | { type: "llm-upsert"; payload: unknown };
+
+const API_BASE_URL = (((import.meta as any).env?.VITE_API_BASE_URL as string | undefined) || "http://localhost:5000").replace(/\/$/, "");
 
 function sortEvents(events: SyscallEvent[]): SyscallEvent[] {
   return [...events].sort((a, b) => {
@@ -85,14 +126,81 @@ function toLogData(event: SyscallEvent): LogData {
   };
 }
 
+function riskLevelForGuardRun(run: GuardRunRecord, action?: GuardActionRecord): LogData["riskLevel"] {
+  const risk = run.rule_base_result?.toLowerCase();
+  if (risk === "harmful" || risk === "ambiguous" || risk === "normal") return risk;
+
+  const result = (action?.rule_result || run.guard_llm_result || run.final_decision || "").toLowerCase();
+  if (result.includes("allow") || result === "approved") return "normal";
+  if (result.includes("timeout") || result.includes("error")) return "ambiguous";
+  return "harmful";
+}
+
+function approvalStatusForGuardRun(run: GuardRunRecord): LogData["approvalStatus"] {
+  if (run.approval_status === "approved") return "approved";
+  if (run.approval_status === "rejected") return "rejected";
+  if (run.final_decision === "allow") return "approved";
+  if (run.final_decision === "deny") return "rejected";
+  return null;
+}
+
+function toSavedLogData(run: GuardRunRecord): LogData {
+  const action = run.actions?.[0];
+  const logId = action?.event_id || `guard-run-${run.id}`;
+  const timestamp = new Date(action?.created_at || run.created_at || Date.now());
+  const systemCall = action?.syscall || action?.normalized_action || "unknown";
+  const summary = action?.summary || action?.raw_summary || run.user_prompt || "저장된 시스템 호출 로그";
+  const approvalStatus = approvalStatusForGuardRun(run);
+  const detailLogs = [
+    `source=supabase`,
+    `guard_run_id=${run.id}`,
+    run.user_id ? `user_id=${run.user_id}` : "",
+    action?.event_id ? `event_id=${action.event_id}` : "",
+    run.final_decision ? `final_decision=${run.final_decision}` : "",
+    run.approval_status ? `approval_status=${run.approval_status}` : "",
+    systemCall ? `syscall=${systemCall}` : "",
+    action?.path ? `path=${action.path}` : "",
+    action?.argv ? `argv=${action.argv}` : "",
+    run.guard_llm_result ? `guard_llm_result=${run.guard_llm_result}` : "",
+    run.guard_llm_reason ? `guard_llm_reason=${run.guard_llm_reason}` : "",
+    run.rule_base_result ? `rule_base_result=${run.rule_base_result}` : "",
+    run.rule_base_reason ? `rule_base_reason=${run.rule_base_reason}` : "",
+    run.created_at ? `created_at=${run.created_at}` : "",
+  ].filter(Boolean);
+
+  return {
+    id: logId,
+    timestamp,
+    eventName: summary,
+    riskLevel: riskLevelForGuardRun(run, action),
+    model: run.agent_name || action?.agent_name || "gVisor",
+    systemCall,
+    description: summary,
+    riskReason: run.guard_llm_reason || run.rule_base_reason || action?.meaning || undefined,
+    requiresApproval: run.approval_status === "pending",
+    approvalStatus,
+    detailLogs,
+  };
+}
+
+function mergeLogs(savedLogs: LogData[], liveLogs: LogData[]): LogData[] {
+  const byId = new Map<string, LogData>();
+  for (const log of savedLogs) byId.set(log.id, log);
+  for (const log of liveLogs) byId.set(log.id, log);
+  return [...byId.values()].sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
+}
+
 export default function App() {
   const [currentView, setCurrentView] = useState<View>("realtime");
   const [events, setEvents] = useState<SyscallEvent[]>([]);
+  const [savedLogs, setSavedLogs] = useState<LogData[]>([]);
   const [wsConnected, setWsConnected] = useState(false);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const focusedIdRef = useRef<string | null>(null);
   const wsConnectedRef = useRef(false);
 
   const logs = useMemo(() => sortEvents(events).map(toLogData), [events]);
+  const historyLogs = useMemo(() => mergeLogs(savedLogs, logs), [savedLogs, logs]);
 
   // Auth modal states
   const [showLoginModal, setShowLoginModal] = useState(false);
@@ -100,6 +208,53 @@ export default function App() {
   const [showEmailVerificationModal, setShowEmailVerificationModal] = useState(false);
   const [verificationEmail, setVerificationEmail] = useState("");
   const [verificationUrl, setVerificationUrl] = useState("");
+
+  const syncCurrentUser = useCallback(async (user: AuthUser | null) => {
+    try {
+      await fetch("/api/current-user", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ user_id: user?.id ?? null }),
+      });
+    } catch {
+      // The UI can still run; only DB attribution is unavailable until the broker accepts the user id.
+    }
+  }, []);
+
+  const loadSavedLogs = useCallback(async (user: AuthUser | null) => {
+    if (!user) {
+      setSavedLogs([]);
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/guard-runs?user_id=${encodeURIComponent(user.id)}`, {
+        cache: "no-store",
+      });
+      if (!response.ok) return;
+      const guardRuns = (await response.json()) as GuardRunRecord[];
+      setSavedLogs(guardRuns.map(toSavedLogData));
+    } catch {
+      // Historical DB logs are best-effort; realtime logs should not be blocked by DB/API failures.
+    }
+  }, []);
+
+  useEffect(() => {
+    const savedAuth =
+      window.localStorage.getItem("gvisor_hook_auth") ||
+      window.sessionStorage.getItem("gvisor_hook_auth");
+    if (!savedAuth) return;
+    try {
+      const payload = JSON.parse(savedAuth);
+      if (payload?.user) {
+        setAuthUser(payload.user);
+        syncCurrentUser(payload.user);
+        loadSavedLogs(payload.user);
+      }
+    } catch {
+      // Ignore stale or manually edited storage.
+    }
+  }, [loadSavedLogs, syncCurrentUser]);
 
   useEffect(() => {
     focusedIdRef.current = logs.find((log) => log.requiresApproval && !log.approvalStatus)?.id ?? null;
@@ -212,7 +367,7 @@ export default function App() {
       </div>
 
       {/* Sidebar */}
-      <Sidebar currentView={currentView} onViewChange={setCurrentView} />
+      <Sidebar currentView={currentView} onViewChange={setCurrentView} user={authUser} />
 
       {/* Main Content */}
       <main className="flex-1 overflow-hidden relative">
@@ -226,8 +381,8 @@ export default function App() {
             className="h-full"
           >
             {currentView === "realtime" && <RealTimeLogs logs={logs} onApproval={handleApproval} />}
-            {currentView === "history" && <LogHistory logs={logs} />}
-            {currentView === "statistics" && <Statistics historicalLogs={logs} realtimeLogs={[]} />}
+            {currentView === "history" && <LogHistory logs={historyLogs} />}
+            {currentView === "statistics" && <Statistics historicalLogs={historyLogs} realtimeLogs={[]} />}
           </motion.div>
         </div>
       </main>
@@ -256,6 +411,12 @@ export default function App() {
         onSwitchToSignup={() => {
           setShowLoginModal(false);
           setShowSignupModal(true);
+        }}
+        onLoginSuccess={(user) => {
+          setAuthUser(user);
+          syncCurrentUser(user);
+          loadSavedLogs(user);
+          setShowLoginModal(false);
         }}
       />
       <SignupModal

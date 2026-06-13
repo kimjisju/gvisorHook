@@ -9,6 +9,8 @@ interface SignupModalProps {
   onEmailVerification: (email: string, verifyUrl?: string) => void;
 }
 
+const API_BASE_URL = (((import.meta as any).env?.VITE_API_BASE_URL as string | undefined) || "http://localhost:5000").replace(/\/$/, "");
+
 export function SignupModal({
   isOpen,
   onClose,
@@ -59,7 +61,7 @@ export function SignupModal({
     }
     setIsSubmitting(true);
     try {
-      const response = await fetch("/signup", {
+      const response = await fetch(`${API_BASE_URL}/signup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, email, password }),

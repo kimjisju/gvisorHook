@@ -23,44 +23,26 @@ interface StatisticsProps {
   realtimeLogs: LogData[];
 }
 
-type DateFilter = "today" | "yesterday" | "twoDaysAgo";
+function dateToInputValue(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function dateRangeFromInputValue(dateValue: string): { startDate: Date; endDate: Date } {
+  const [year, month, day] = dateValue.split("-").map(Number);
+  const startDate = new Date(year, month - 1, day);
+  const endDate = new Date(startDate.getTime() + 24 * 60 * 60 * 1000);
+  return { startDate, endDate };
+}
 
 export function Statistics({ historicalLogs, realtimeLogs }: StatisticsProps) {
-  const [dateFilter, setDateFilter] = useState<DateFilter>("today");
-
-  const dateFilterOptions: { value: DateFilter; label: string }[] = [
-    { value: "twoDaysAgo", label: "2일 전" },
-    { value: "yesterday", label: "1일 전" },
-    { value: "today", label: "오늘" },
-  ];
-
-  const getDateThreshold = (filter: DateFilter): Date => {
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-
-    switch (filter) {
-      case "today":
-        return today;
-      case "yesterday":
-        return new Date(today.getTime() - 24 * 60 * 60 * 1000);
-      case "twoDaysAgo":
-        return new Date(today.getTime() - 2 * 24 * 60 * 60 * 1000);
-    }
-  };
-
-  const getDateEndThreshold = (filter: DateFilter): Date => {
-    const threshold = getDateThreshold(filter);
-    return new Date(threshold.getTime() + 24 * 60 * 60 * 1000);
-  };
+  const [selectedDate, setSelectedDate] = useState(() => dateToInputValue(new Date()));
 
   const stats = useMemo(() => {
-    const startDate = getDateThreshold(dateFilter);
-    const endDate = getDateEndThreshold(dateFilter);
-
-    // Combine logs based on date filter
-    const allLogs = dateFilter === "today"
-      ? [...historicalLogs, ...realtimeLogs]
-      : historicalLogs;
+    const { startDate, endDate } = dateRangeFromInputValue(selectedDate);
+    const allLogs = [...historicalLogs, ...realtimeLogs];
 
     const logsInRange = allLogs.filter(
       log => log.timestamp >= startDate && log.timestamp < endDate
@@ -94,7 +76,7 @@ export function Statistics({ historicalLogs, realtimeLogs }: StatisticsProps) {
       rejectedCount,
       hourlyDistribution,
     };
-  }, [historicalLogs, realtimeLogs, dateFilter]);
+  }, [historicalLogs, realtimeLogs, selectedDate]);
 
   const riskPieData = [
     { name: "위험", value: stats.harmfulCount, color: "#ef4444" },
@@ -153,22 +135,22 @@ export function Statistics({ historicalLogs, realtimeLogs }: StatisticsProps) {
         <label className="block text-sm font-semibold text-muted-foreground mb-3">
           날짜 선택
         </label>
-        <div className="flex gap-3">
-          {dateFilterOptions.map((option) => (
-            <button
-              key={option.value}
-              onClick={() => setDateFilter(option.value)}
-              className={`
-                flex-1 px-6 py-3 rounded-xl font-semibold transition-all
-                ${dateFilter === option.value
-                  ? 'bg-gradient-to-r from-blue-600 to-cyan-600 text-white shadow-lg shadow-blue-500/20'
-                  : 'bg-white text-slate-700 hover:bg-slate-50 border border-slate-300'
-                }
-              `}
-            >
-              {option.label}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center gap-3">
+          <input
+            type="date"
+            value={selectedDate}
+            onChange={(e) => setSelectedDate(e.target.value || dateToInputValue(new Date()))}
+            className="w-[220px] px-4 py-3 bg-white border border-slate-300 rounded-xl text-sm font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+          />
+          <button
+            onClick={() => setSelectedDate(dateToInputValue(new Date()))}
+            className="px-4 py-3 rounded-xl border border-slate-300 bg-white text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-all"
+          >
+            오늘
+          </button>
+          <div className="text-sm text-muted-foreground">
+            선택한 날짜의 저장 로그와 현재 실행 로그를 기준으로 계산합니다.
+          </div>
         </div>
       </div>
 

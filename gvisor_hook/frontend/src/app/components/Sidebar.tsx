@@ -1,11 +1,16 @@
 import { motion } from "motion/react";
-import { Activity, History, BarChart3 } from "lucide-react";
+import { Activity, History, BarChart3, UserCircle } from "lucide-react";
 
 export type View = "realtime" | "history" | "statistics";
 
 interface SidebarProps {
   currentView: View;
   onViewChange: (view: View) => void;
+  user?: {
+    id: number;
+    name: string;
+    email: string;
+  } | null;
 }
 
 const menuItems = [
@@ -26,7 +31,7 @@ const menuItems = [
   },
 ];
 
-export function Sidebar({ currentView, onViewChange }: SidebarProps) {
+export function Sidebar({ currentView, onViewChange, user }: SidebarProps) {
   return (
     <div className="w-72 h-full bg-gradient-to-b from-slate-50 to-slate-100 border-r border-slate-200 flex flex-col">
       {/* Header */}
@@ -97,6 +102,29 @@ export function Sidebar({ currentView, onViewChange }: SidebarProps) {
           );
         })}
       </nav>
+
+      <div className="p-4 border-t border-slate-200">
+        <div className="rounded-xl bg-white border border-slate-200 p-4 shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-blue-600 to-cyan-500 flex items-center justify-center text-white">
+              <UserCircle className="w-6 h-6" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs font-medium text-slate-500">
+                {user ? "로그인됨" : "로그인 필요"}
+              </div>
+              <div className="font-semibold text-slate-900 truncate">
+                {user?.name || "게스트"}
+              </div>
+              {user?.email && (
+                <div className="text-xs text-slate-500 truncate">
+                  {user.email}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
 
     </div>
   );

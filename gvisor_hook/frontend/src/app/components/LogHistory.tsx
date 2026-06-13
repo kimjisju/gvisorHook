@@ -10,13 +10,29 @@ interface LogHistoryProps {
 type RiskFilter = "all" | "harmful" | "ambiguous" | "normal";
 type SortOrder = "newest" | "oldest";
 
+function isSameLocalDate(date: Date, dateValue: string): boolean {
+  if (!dateValue) return true;
+  const [year, month, day] = dateValue.split("-").map(Number);
+  return (
+    date.getFullYear() === year &&
+    date.getMonth() === month - 1 &&
+    date.getDate() === day
+  );
+}
+
 export function LogHistory({ logs }: LogHistoryProps) {
   const [searchTerm, setSearchTerm] = useState("");
   const [riskFilter, setRiskFilter] = useState<RiskFilter>("all");
   const [sortOrder, setSortOrder] = useState<SortOrder>("newest");
+  const [selectedDate, setSelectedDate] = useState("");
 
   const filteredAndSortedLogs = useMemo(() => {
     let result = [...logs];
+
+    // Apply date filter
+    if (selectedDate) {
+      result = result.filter(log => isSameLocalDate(log.timestamp, selectedDate));
+    }
 
     // Apply search filter
     if (searchTerm) {
@@ -42,7 +58,7 @@ export function LogHistory({ logs }: LogHistoryProps) {
     });
 
     return result;
-  }, [logs, searchTerm, riskFilter, sortOrder]);
+  }, [logs, selectedDate, searchTerm, riskFilter, sortOrder]);
 
   const riskFilterOptions: { value: RiskFilter; label: string }[] = [
     { value: "all", label: "전체" },
@@ -75,9 +91,9 @@ export function LogHistory({ logs }: LogHistoryProps) {
         </div>
 
         {/* Filters Row */}
-        <div className="flex gap-4">
+        <div className="flex flex-wrap gap-3 items-end">
           {/* Risk Filter */}
-          <div className="flex-1">
+          <div className="min-w-[280px] flex-1">
             <label className="block text-sm font-semibold text-muted-foreground mb-2 flex items-center gap-2">
               <Filter className="w-4 h-4" />
               위험도
@@ -88,7 +104,7 @@ export function LogHistory({ logs }: LogHistoryProps) {
                   key={option.value}
                   onClick={() => setRiskFilter(option.value)}
                   className={`
-                    flex-1 px-4 py-2 rounded-lg font-semibold text-sm transition-all
+                    px-3 py-1.5 rounded-lg font-semibold text-xs transition-all min-w-[58px]
                     ${riskFilter === option.value
                       ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
                       : 'bg-white text-slate-700 hover:bg-slate-50 border border-slate-300'
@@ -102,7 +118,7 @@ export function LogHistory({ logs }: LogHistoryProps) {
           </div>
 
           {/* Sort Order */}
-          <div className="flex-1">
+          <div className="w-[220px]">
             <label className="block text-sm font-semibold text-muted-foreground mb-2 flex items-center gap-2">
               <Calendar className="w-4 h-4" />
               정렬
@@ -111,7 +127,7 @@ export function LogHistory({ logs }: LogHistoryProps) {
               <button
                 onClick={() => setSortOrder("newest")}
                 className={`
-                  flex-1 px-4 py-2 rounded-lg font-semibold text-sm transition-all
+                  flex-1 px-3 py-1.5 rounded-lg font-semibold text-xs transition-all
                   ${sortOrder === "newest"
                     ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
                     : 'bg-white text-slate-700 hover:bg-slate-50 border border-slate-300'
@@ -123,7 +139,7 @@ export function LogHistory({ logs }: LogHistoryProps) {
               <button
                 onClick={() => setSortOrder("oldest")}
                 className={`
-                  flex-1 px-4 py-2 rounded-lg font-semibold text-sm transition-all
+                  flex-1 px-3 py-1.5 rounded-lg font-semibold text-xs transition-all
                   ${sortOrder === "oldest"
                     ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
                     : 'bg-white text-slate-700 hover:bg-slate-50 border border-slate-300'
@@ -131,6 +147,28 @@ export function LogHistory({ logs }: LogHistoryProps) {
                 `}
               >
                 오래된순
+              </button>
+            </div>
+          </div>
+
+          {/* Date Filter */}
+          <div className="w-[260px]">
+            <label className="block text-sm font-semibold text-muted-foreground mb-2 flex items-center gap-2">
+              <Calendar className="w-4 h-4" />
+              날짜
+            </label>
+            <div className="flex gap-2">
+              <input
+                type="date"
+                value={selectedDate}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                className="flex-1 px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
+              />
+              <button
+                onClick={() => setSelectedDate("")}
+                className="px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50 transition-all"
+              >
+                전체
               </button>
             </div>
           </div>

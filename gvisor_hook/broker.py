@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import re
 import signal
 import time
@@ -13,7 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from aiohttp import web
+from aiohttp import ClientSession, ClientTimeout, web
 
 from .app_db import AppDatabase
 from .models import BrokerEnvelope, LLMExchange, RiskLevel, SyscallEvent
@@ -225,6 +226,9 @@ class ApprovalBroker:
         self._event_log_buffer = ""
         self._llm_log_offset = 0
         self._llm_log_buffer = ""
+        self._guard_api_url = os.environ.get("ARGUS_GUARD_API_URL", "").rstrip("/")
+        self._persisted_guard_event_ids: set[str] = set()
+        self._current_user_id: int | None = None
         self._reason_pipeline_semaphore = (
             asyncio.Semaphore(reason_pipeline_config.max_concurrency) if reason_pipeline_config is not None else None
         )
@@ -439,6 +443,98 @@ class ApprovalBroker:
             f"Risk reason: {reason}"
         )
 
+    def _agent_name(self) -> str:
+        if self.reason_pipeline_config is not None:
+            return self.reason_pipeline_config.agent_name
+        return "agent"
+
+    def _approval_status_for_event(self, event: SyscallEvent) -> str:
+        if event.status == "allowed":
+            return "approved"
+        if event.status in {"denied", "timeout", "error"}:
+            return "rejected"
+        return "pending"
+
+    def _target_class_for_event(self, event: SyscallEvent) -> str | None:
+        if event.path:
+            return "file"
+        if event.argv:
+            return "process"
+        return None
+
+    def _guard_run_payload_for_event(self, event: SyscallEvent) -> dict[str, Any]:
+        agent_name = self._agent_name()
+        final_decision = {
+            "allowed": "allow",
+            "denied": "deny",
+            "timeout": "timeout",
+            "error": "error",
+        }.get(event.status, event.status)
+        reason = event.guard_reason or event.agent_message
+        argv = json.dumps(event.argv, ensure_ascii=False) if event.argv is not None else None
+        return {
+            "user_id": self._current_user_id,
+            "agent_name": agent_name,
+            "user_prompt": f"gvisorHook syscall event: {event.summary}",
+            "ai_agent_reasoning": event.agent_message,
+            "rule_base_result": event.risk_level,
+            "rule_base_reason": reason,
+            "guard_llm_result": event.guard_decision,
+            "guard_llm_reason": event.guard_reason,
+            "final_decision": final_decision,
+            "approval_status": self._approval_status_for_event(event),
+            "actions": [
+                {
+                    "action_order": 1,
+                    "agent_name": agent_name,
+                    "event_id": event.id,
+                    "created_at": event.started_at,
+                    "syscall": event.syscall,
+                    "path": event.path,
+                    "argv": argv,
+                    "raw_summary": event.summary,
+                    "summary": event.summary,
+                    "meaning": reason,
+                    "normalized_action": event.syscall,
+                    "target_class": self._target_class_for_event(event),
+                    "rule_result": event.guard_decision or event.status,
+                }
+            ],
+        }
+
+    async def _persist_guard_event(self, event: SyscallEvent) -> None:
+        if not self._guard_api_url:
+            return
+        if event.status not in {"allowed", "denied", "timeout", "error"}:
+            return
+        if self._current_user_id is None:
+            LOG.info("Skipping guard event persistence id=%s because no user is logged in", event.id)
+            return
+        async with self._lock:
+            if event.id in self._persisted_guard_event_ids:
+                return
+            self._persisted_guard_event_ids.add(event.id)
+
+        url = f"{self._guard_api_url}/guard-runs"
+        payload = self._guard_run_payload_for_event(event)
+        try:
+            async with ClientSession(timeout=ClientTimeout(total=5)) as session:
+                async with session.post(url, json=payload) as response:
+                    if response.status >= 400:
+                        body = await response.text()
+                        LOG.warning(
+                            "Guard event persistence failed id=%s status=%s body=%s",
+                            event.id,
+                            response.status,
+                            body[:500],
+                        )
+                        return
+                    LOG.info("Persisted guard event id=%s to %s", event.id, url)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOG.exception("Guard event persistence failed id=%s: %s", event.id, exc)
+
     async def _guard_decision_for_event(self, event: SyscallEvent) -> tuple[str, str, RiskLevel]:
         if self.reason_pipeline_config is None:
             return "USER_CONFIRM", "Reason pipeline is not configured.", "ambiguous"
@@ -515,6 +611,7 @@ class ApprovalBroker:
                         )
                         allowed_event = self._events[event.id]
                     await self._broadcast(BrokerEnvelope("event-upsert", {"event": allowed_event.to_dict()}).to_dict())
+                    self._start_task(self._persist_guard_event(allowed_event))
                 else:
                     future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
                     async with self._lock:
@@ -771,6 +868,8 @@ class ApprovalBroker:
             if status not in {"pending", "guard_checking"}:
                 self._pending.pop(event_id, None)
             updated = self._events[event_id]
+        if status in {"allowed", "denied", "timeout", "error"}:
+            self._start_task(self._persist_guard_event(updated))
         await self._broadcast(BrokerEnvelope("event-upsert", {"event": updated.to_dict()}).to_dict())
 
     async def decide(self, event_id: str, decision: str) -> bool:
@@ -877,6 +976,23 @@ def _install_routes(app: web.Application) -> None:
             raise web.HTTPBadRequest(text="enabled must be boolean")
         await broker.set_auto_accept(enabled)
         return web.json_response({"ok": True, "auto_accept": enabled})
+
+    async def current_user_handler(request: web.Request) -> web.Response:
+        payload = await request.json()
+        raw_user_id = payload.get("user_id")
+        if raw_user_id is None:
+            async with broker._lock:
+                broker._current_user_id = None
+            return web.json_response({"ok": True, "user_id": None})
+        try:
+            user_id = int(raw_user_id)
+        except (TypeError, ValueError) as exc:
+            raise web.HTTPBadRequest(text="user_id must be an integer") from exc
+        if user_id <= 0:
+            raise web.HTTPBadRequest(text="user_id must be a positive integer")
+        async with broker._lock:
+            broker._current_user_id = user_id
+        return web.json_response({"ok": True, "user_id": user_id})
 
     async def signup_handler(request: web.Request) -> web.Response:
         payload = await request.json()
@@ -1016,6 +1132,7 @@ def _install_routes(app: web.Application) -> None:
     app.router.add_get("/ws", websocket_handler)
     app.router.add_post("/api/events/{event_id}/decision", decide_handler)
     app.router.add_post("/api/auto-accept", auto_accept_handler)
+    app.router.add_post("/api/current-user", current_user_handler)
 
 
 async def create_app(

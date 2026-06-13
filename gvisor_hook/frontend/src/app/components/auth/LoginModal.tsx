@@ -6,9 +6,12 @@ interface LoginModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSwitchToSignup: () => void;
+  onLoginSuccess: (user: { id: number; name: string; email: string }) => void;
 }
 
-export function LoginModal({ isOpen, onClose, onSwitchToSignup }: LoginModalProps) {
+const API_BASE_URL = (((import.meta as any).env?.VITE_API_BASE_URL as string | undefined) || "http://localhost:5000").replace(/\/$/, "");
+
+export function LoginModal({ isOpen, onClose, onSwitchToSignup, onLoginSuccess }: LoginModalProps) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -22,7 +25,7 @@ export function LoginModal({ isOpen, onClose, onSwitchToSignup }: LoginModalProp
     setMessage("");
     setIsSubmitting(true);
     try {
-      const response = await fetch("/login", {
+      const response = await fetch(`${API_BASE_URL}/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),
@@ -33,6 +36,7 @@ export function LoginModal({ isOpen, onClose, onSwitchToSignup }: LoginModalProp
       }
       const storage = rememberMe ? window.localStorage : window.sessionStorage;
       storage.setItem("gvisor_hook_auth", JSON.stringify(payload));
+      if (payload.user) onLoginSuccess(payload.user);
       setIsError(false);
       setMessage(`${payload.user?.name || "사용자"}님, 로그인되었습니다.`);
     } catch (error) {
