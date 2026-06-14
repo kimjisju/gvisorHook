@@ -38,6 +38,16 @@ def build_parser() -> argparse.ArgumentParser:
     launch_parser.add_argument("--workdir", required=True)
     launch_parser.add_argument("--web-port", type=int, default=8080)
     launch_parser.add_argument("--decision-timeout", type=float, default=30.0)
+    launch_parser.add_argument(
+        "--no-windows-notifier",
+        action="store_true",
+        help="Do not start the Windows desktop approval notifier when running under WSL.",
+    )
+    launch_parser.add_argument(
+        "--windows-notifier-site-title",
+        default=None,
+        help="Optional browser window title used to focus an existing ARGUS approval page.",
+    )
     launch_parser.add_argument("--runsc-bin", default=None)
     launch_parser.add_argument(
         "--runsc-strace",
@@ -97,6 +107,9 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--reason-pipeline-log-path", default=None)
     serve_parser.add_argument("--reason-pipeline-db-path", default=None)
     serve_parser.add_argument("--reason-pipeline-max-concurrency", type=int, default=1)
+    serve_parser.add_argument("--no-windows-notifier", action="store_true")
+    serve_parser.add_argument("--windows-notifier-broker-url", default=None)
+    serve_parser.add_argument("--windows-notifier-site-title", default=None)
 
     replay_parser = subparsers.add_parser(
         "replay-reason-pipeline",

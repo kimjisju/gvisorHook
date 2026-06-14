@@ -521,6 +521,9 @@ def spawn_broker(
     reason_pipeline_log_path: Path | None = None,
     reason_pipeline_db_path: Path | None = None,
     reason_pipeline_max_concurrency: int = 1,
+    windows_notifier: bool = True,
+    windows_notifier_broker_url: str | None = None,
+    windows_notifier_site_title: str | None = None,
 ) -> subprocess.Popen[bytes]:
     command = [
         sys.executable,
@@ -542,6 +545,12 @@ def spawn_broker(
         "--tcp-port",
         str(tcp_port),
     ]
+    if not windows_notifier:
+        command.append("--no-windows-notifier")
+    if windows_notifier_broker_url:
+        command.extend(["--windows-notifier-broker-url", windows_notifier_broker_url])
+    if windows_notifier_site_title:
+        command.extend(["--windows-notifier-site-title", windows_notifier_site_title])
     if event_log_path is not None and decision_dir is not None:
         command.extend(
             [
@@ -841,6 +850,9 @@ def launch(args: argparse.Namespace) -> int:
             reason_pipeline_log_path=reason_pipeline_log_path,
             reason_pipeline_db_path=reason_pipeline_db_path,
             reason_pipeline_max_concurrency=args.reason_pipeline_max_concurrency,
+            windows_notifier=not getattr(args, "no_windows_notifier", False),
+            windows_notifier_broker_url=f"http://{host_ip}:{args.web_port}",
+            windows_notifier_site_title=getattr(args, "windows_notifier_site_title", None),
         )
         wait_for_http_ready(args.web_port, timeout=10)
         resolv_path, hosts_path, nsswitch_path = write_runtime_network_files(runtime_dir)

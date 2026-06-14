@@ -19,6 +19,7 @@ from aiohttp import ClientSession, ClientTimeout, web
 from .app_db import AppDatabase
 from .models import BrokerEnvelope, LLMExchange, RiskLevel, SyscallEvent
 from .reason_pipeline import ReasonPipelineConfig, run_reason_pipeline_event
+from .windows_notifier import spawn_windows_approval_notifier
 
 LOG = logging.getLogger(__name__)
 
@@ -932,13 +933,19 @@ def _install_routes(app: web.Application) -> None:
             return web.Response(
                 text=(UI_DIST_PATH / "index.html").read_text(encoding="utf-8"),
                 content_type="text/html",
+                headers={"Cache-Control": "no-store, max-age=0"},
             )
         with suppress(FileNotFoundError):
             return web.Response(
                 text=INDEX_HTML_PATH.read_text(encoding="utf-8"),
                 content_type="text/html",
+                headers={"Cache-Control": "no-store, max-age=0"},
             )
-        return web.Response(text=INDEX_HTML, content_type="text/html")
+        return web.Response(
+            text=INDEX_HTML,
+            content_type="text/html",
+            headers={"Cache-Control": "no-store, max-age=0"},
+        )
 
     async def health(_: web.Request) -> web.Response:
         return web.json_response({"ok": True})
@@ -1200,6 +1207,16 @@ async def serve(args: argparse.Namespace) -> None:
         unix_site = web.UnixSite(runner, path=str(http_socket_path))
         await unix_site.start()
         http_socket_path.chmod(0o777)
+    notifier_process = None
+    if not getattr(args, "no_windows_notifier", False):
+        notifier_broker_url = getattr(args, "windows_notifier_broker_url", None)
+        if not notifier_broker_url:
+            notifier_host = args.bind_host or "127.0.0.1"
+            notifier_broker_url = f"http://{notifier_host}:{args.web_port}"
+        notifier_process = spawn_windows_approval_notifier(
+            broker_url=notifier_broker_url,
+            site_window_title=getattr(args, "windows_notifier_site_title", None),
+        )
     approval_endpoints: list[str] = []
     if args.event_log_path and args.decision_dir:
         approval_endpoints.append(f"file://{args.event_log_path} -> {args.decision_dir}")
@@ -1216,8 +1233,14 @@ async def serve(args: argparse.Namespace) -> None:
     for signame in (signal.SIGTERM, signal.SIGINT):
         with suppress(NotImplementedError):
             loop.add_signal_handler(signame, stop_event.set)
-    await stop_event.wait()
-    await runner.cleanup()
+    try:
+        await stop_event.wait()
+    finally:
+        if notifier_process is not None and notifier_process.poll() is None:
+            with suppress(Exception):
+                notifier_process.terminate()
+                notifier_process.wait(timeout=3)
+        await runner.cleanup()
 
 
 def build_reason_pipeline_config(args: argparse.Namespace) -> ReasonPipelineConfig | None:
