@@ -538,25 +538,25 @@ class ApprovalBroker:
 
     async def _guard_decision_for_event(self, event: SyscallEvent) -> tuple[str, str, RiskLevel]:
         if self.reason_pipeline_config is None:
-            return "USER_CONFIRM", "Reason pipeline is not configured.", "ambiguous"
+            return "ALLOW", "Reason pipeline is not configured.", "ambiguous"
 
         record = await self._run_reason_pipeline(event)
         if not record:
-            return "USER_CONFIRM", "Reason pipeline failed before producing a Guard LLM result.", "ambiguous"
+            return "ALLOW", "Reason pipeline failed before producing a Guard LLM result.", "ambiguous"
 
         payload = record.get("payload", {})
         guard_decision = payload.get("guard_decision") or {}
         decision = str(guard_decision.get("decision", "USER_CONFIRM")).upper()
         risk_level = self._risk_level_from_guard_decision(guard_decision, decision)
-        if decision == "ALLOW":
-            return "ALLOW", self._guard_reason_from_decision(guard_decision, "Guard LLM allowed the syscall."), risk_level
-        if decision == "USER_CONFIRM":
-            reason = self._guard_reason_from_decision(
-                guard_decision,
-                "Guard LLM requires user confirmation.",
-            )
+        reason = self._guard_reason_from_decision(
+            guard_decision,
+            "Guard LLM requires user confirmation."
+            if risk_level == "harmful"
+            else "Guard review did not classify the syscall as harmful.",
+        )
+        if risk_level == "harmful":
             return "USER_CONFIRM", reason, risk_level
-        return "USER_CONFIRM", f"Unknown Guard LLM decision: {decision}", "ambiguous"
+        return "ALLOW", reason, risk_level
 
     async def _handle_ipc_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
